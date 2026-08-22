@@ -1,0 +1,581 @@
+#!/bin/zsh
+#
+# coldprint — print a secret to paper for a continuity envelope.
+#
+# NOTE: there is deliberately no `unset HISTFILE` here. A non-interactive zsh
+# script writes no history, and values captured by `read` never enter history
+# under any circumstance. Unsetting it would imply a protection that does not
+# exist. The only history artifact is this script's own invocation, which is
+# harmless.
+
+emulate -L zsh
+
+readonly OVERRIDE_TOKEN='OVERRIDE'
+
+# classify_transport <device-uri>
+# Prints one of: usb | ipps | cleartext | unknown
+#
+# The URI scheme alone is insufficient: dnssd:// URIs are cleartext or TLS
+# depending on the advertised service type embedded in the URI. _ipps must be
+# tested before _ipp.
+classify_transport() {
+    local uri="$1"
+    case "$uri" in
+        (ippusb://*|usb://*)      print -r -- "usb" ;;
+        (ipps://*)                print -r -- "ipps" ;;
+        (dnssd://*_ipps._tcp*)    print -r -- "ipps" ;;
+        (dnssd://*_ipp._tcp*)     print -r -- "cleartext" ;;
+        (ipp://*|http://*|https://*|socket://*|lpd://*|smb://*)
+                                  print -r -- "cleartext" ;;
+        (*)                       print -r -- "unknown" ;;
+    esac
+}
+
+# Full-disk backup agents. Deliberately excludes `backupd`: it is a resident
+# daemon on macOS 26 and would trip the gate on every run, training the user to
+# reflex-type the override. Time Machine is covered by _tm_autobackup/_tm_running.
+#
+# Deliberately excludes file-sync daemons (bird/iCloud, Dropbox, Google Drive):
+# `bird` runs permanently, and these sync the home directory only — the secret
+# never lands there. They are named in the Tier 1 banner instead.
+#
+# pgrep -f (full command line) is required, not -x: ChronoSync's process is
+# named "ChronoSync Scheduler" and -x misses it.
+typeset -ga BACKUP_AGENT_PATTERNS=(
+    bztransmit bzbkup bzserv
+    Arq ccc_helper SuperDuper ChronoSync
+    restic borg duplicati
+)
+
+_tm_autobackup() {
+    defaults read /Library/Preferences/com.apple.TimeMachine.plist AutoBackup 2>/dev/null || true
+}
+
+_tm_running() {
+    tmutil status 2>/dev/null | awk -F'=' '/Running/ { gsub(/[^0-9]/, "", $2); print $2; exit }' || true
+}
+
+_pgrep_agent() {
+    pgrep -qf "$1" 2>/dev/null
+}
+
+# detect_backup_agents
+# Prints one line per live backup mechanism. Empty output means clear.
+detect_backup_agents() {
+    local -a live
+    local p
+
+    [[ "$(_tm_autobackup)" == "1" ]] && \
+        live+=("Time Machine: AutoBackup is enabled (can start mid-print)")
+    [[ "$(_tm_running)" == "1" ]] && \
+        live+=("Time Machine: a backup is in progress")
+
+    for p in $BACKUP_AGENT_PATTERNS; do
+        _pgrep_agent "$p" && live+=("Process: $p")
+    done
+
+    (( ${#live} )) && print -rl -- $live
+    return 0
+}
+
+# backup_banner — Tier 1. Unconditional, every run, regardless of detection.
+backup_banner() {
+    print -r -- "" >&2
+    print -r -- "  Pause all automatic backup, sync, and snapshot software before continuing." >&2
+    print -r -- "  Time Machine - Backblaze - Arq - Carbon Copy Cloner - ChronoSync -" >&2
+    print -r -- "  Dropbox - iCloud Drive - restic - borg - or anything else you run." >&2
+    print -r -- "" >&2
+    print -r -- "  While the job prints, it exists in cleartext in /var/spool/cups." >&2
+    print -r -- "" >&2
+}
+
+# backup_gate — Tier 2. Returns 0 to proceed, 2 to abort.
+backup_gate() {
+    local -a live
+    local reply
+    live=( ${(f)"$(detect_backup_agents)"} )
+
+    (( ${#live} )) || return 0
+
+    print -r -- "  BLOCKED. These are live right now:" >&2
+    print -rl -- "    ${^live}" >&2
+    print -r -- "" >&2
+    print -r -- "  Stop them, or type ${OVERRIDE_TOKEN} to print anyway." >&2
+    printf '  > ' >&2
+    IFS= read -r reply || return 2
+
+    [[ "$reply" == "$OVERRIDE_TOKEN" ]] || { print -r -- "  Aborted." >&2; return 2 }
+    print -r -- "  Overridden." >&2
+    return 0
+}
+
+_lpstat_v() { lpstat -v 2>/dev/null }
+
+# enumerate_printers
+# Prints "name<TAB>transport", safe transports first.
+enumerate_printers() {
+    local line name uri t
+    local -a safe unsafe
+    while IFS= read -r line; do
+        [[ "$line" == device\ for\ * ]] || continue
+        name="${${line#device for }%%:*}"
+        uri="${line#*: }"
+        t="$(classify_transport "$uri")"
+        case "$t" in
+            (usb|ipps)  safe+=("$name	$t") ;;
+            (*)         unsafe+=("$name	$t") ;;
+        esac
+    done < <(_lpstat_v)
+    (( ${#safe} ))   && print -rl -- $safe
+    (( ${#unsafe} )) && print -rl -- $unsafe
+    return 0
+}
+
+# _confirm_transport <name> <transport>
+# Safe transports pass silently. Cleartext and unknown require the override
+# token — the same friction as the backup gate, so there is one mental model.
+_confirm_transport() {
+    local name="$1" t="$2" reply
+    case "$t" in
+        (usb|ipps) return 0 ;;
+    esac
+    print -r -- "" >&2
+    print -r -- "  $name uses a $t transport. The secret would cross the network unencrypted." >&2
+    print -r -- "  Type ${OVERRIDE_TOKEN} to use it anyway." >&2
+    printf '  > ' >&2
+    IFS= read -r reply || return 1
+    [[ "$reply" == "$OVERRIDE_TOKEN" ]]
+}
+
+# select_printer [preselected-name]
+# Prints the chosen queue name. Returns 3 if the user refuses.
+select_printer() {
+    local preselect="${1:-}"
+    local -a rows
+    local row name t choice
+    local -i i
+
+    rows=( ${(f)"$(enumerate_printers)"} )
+    (( ${#rows} )) || { print -r -- "No print queues found." >&2; return 3 }
+
+    if [[ -n "$preselect" ]]; then
+        for row in $rows; do
+            [[ "${row%%	*}" == "$preselect" ]] || continue
+            t="${row##*	}"
+            _confirm_transport "$preselect" "$t" || return 3
+            print -r -- "$preselect"
+            return 0
+        done
+        print -r -- "No such print queue: $preselect" >&2
+        return 3
+    fi
+
+    print -r -- "" >&2
+    print -r -- "  Select printer:" >&2
+    for (( i = 1; i <= ${#rows}; i++ )); do
+        name="${rows[i]%%	*}"
+        t="${rows[i]##*	}"
+        case "$t" in
+            (usb)  printf '    %d) %-30s usb          no network exposure\n' $i "$name" >&2 ;;
+            (ipps) printf '    %d) %-30s ipps / TLS   encrypted in transit\n' $i "$name" >&2 ;;
+            (*)    printf '    %d) %-30s %-12s CLEARTEXT\n' $i "$name" "$t" >&2 ;;
+        esac
+    done
+    printf '  > ' >&2
+    IFS= read -r choice || return 3
+
+    [[ "$choice" == <-> ]] && (( choice >= 1 && choice <= ${#rows} )) || {
+        print -r -- "  Invalid selection." >&2; return 3
+    }
+
+    name="${rows[choice]%%	*}"
+    t="${rows[choice]##*	}"
+    _confirm_transport "$name" "$t" || return 3
+    print -r -- "$name"
+    return 0
+}
+
+# read_secret_lines
+# Reads from stdin until a blank line or EOF. Captured lines go to stdout,
+# progress to stderr.
+#
+# Echo is suppressed with stty rather than `read -s` so that a single restore
+# path covers the whole loop, and bracketed paste is explicitly disabled: if the
+# terminal has it armed, a paste arrives wrapped in ESC[200~ / ESC[201~ and
+# those bytes would land silently inside the secret.
+read_secret_lines() {
+    local -a lines
+    local line saved=""
+    local -i n=0 interactive=0
+    [[ -t 0 ]] && interactive=1
+
+    if (( interactive )); then
+        saved="$(stty -g)"
+        # Restore on any exit path, including Ctrl-C mid-secret.
+        trap 'stty "$saved" 2>/dev/null; printf "\033[?2004h" >&2' EXIT INT TERM
+        printf '\033[?2004l' >&2
+        stty -echo
+    fi
+
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && break
+        # Defence in depth. The ESC[?2004l above asks the terminal not to wrap
+        # pastes, but tmux and some emulators re-arm it regardless. These bytes
+        # are never legitimate secret content, and a silently corrupted secret
+        # on paper cannot be recovered.
+        if [[ "$line" == *$'\033'\[20[01]~* ]]; then
+            line="${line//$'\033'\[200~/}"
+            line="${line//$'\033'\[201~/}"
+            print -r -- "  ! stripped a bracketed paste wrapper from this line" >&2
+        fi
+        lines+=("$line")
+        (( n++ ))
+        printf '  . line %d captured (%d chars)\n' $n ${#line} >&2
+    done
+
+    if (( interactive )); then
+        stty "$saved"
+        printf '\033[?2004h' >&2
+        trap - EXIT INT TERM
+        print -r -- "" >&2
+    fi
+
+    (( ${#lines} )) && print -rl -- $lines
+    return 0
+}
+
+# flag_characters <line>...
+# Prints one warning per issue. Nothing is ever stripped: a trailing space can
+# be legitimate in a passphrase, and silently mutating a secret is worse than
+# an ugly one.
+flag_characters() {
+    local -a warn
+    local l
+    local -i i=0
+    for l in "$@"; do
+        (( i++ ))
+        [[ "$l" == *[[:space:]] ]] && \
+            warn+=("line $i has trailing whitespace (preserved as-is)")
+        [[ "$l" == *$'\t'* ]] && \
+            warn+=("line $i contains a tab")
+        [[ "$l" == *[^[:ascii:]]* ]] && \
+            warn+=("line $i contains non-ASCII (prints correctly, but widens the layout)")
+    done
+    (( ${#warn} )) && print -rl -- $warn
+    return 0
+}
+
+# mask_line <text>
+# Lines of 5 characters or fewer are fully masked: revealing two at each end of
+# a 5-character secret would expose 80% of it.
+mask_line() {
+    local s="$1"
+    local -i n=${#s}
+    local dots=""
+
+    (( n == 0 )) && return 0
+    if (( n <= 5 )); then
+        repeat $n; do dots+="•"; done
+        print -r -- "$dots"
+        return 0
+    fi
+    repeat $(( n - 4 )); do dots+="•"; done
+    print -r -- "${s[1,2]}${dots}${s[-2,-1]}"
+}
+
+# render_preview <label> <line>...
+# Character counts are per-line content only and exclude line terminators, so
+# the total differs from the checksum input length by the number of newlines.
+#
+# Padding is computed on character count, not with printf %-14s: the mask
+# character is 3 bytes in UTF-8 and printf pads by bytes, which would misalign
+# the column.
+render_preview() {
+    local label="$1"; shift
+    local -a masks
+    local -i i=0 total=0 width=0
+    local l noun
+
+    # Two passes: the column is sized to the widest mask so it never overflows.
+    # A fixed width would break on any secret longer than the column, which for
+    # typical recovery codes is most of them.
+    for l in "$@"; do
+        masks+=("$(mask_line "$l")")
+        (( ${#masks[-1]} > width )) && width=${#masks[-1]}
+    done
+
+    print -r -- "Label:  $label" >&2
+    print -r -- "Lines:  $#" >&2
+    print -r -- "" >&2
+    for l in "$@"; do
+        (( i++ ))
+        (( total += ${#l} ))
+        printf '  [%2d] %s%*s(%d chars)\n' \
+            $i "${masks[i]}" $(( width - ${#masks[i]} + 2 )) '' ${#l} >&2
+    done
+    print -r -- "" >&2
+    noun="lines"; (( $# == 1 )) && noun="line"
+    print -r -- "  Total: $# $noun, $total chars" >&2
+    return 0
+}
+
+# Usable width is 612pt - 54pt - 54pt = 504pt; a character is 72/cpi points.
+# Verified empirically: a 10-character string measures 72.01pt at cpi=10 and
+# 60.01pt at cpi=12.
+typeset -ga CPI_LADDER=(10 12 15 17)
+typeset -ga CPI_CHARS=(70 84 105 119)
+
+# select_cpi <widest-line> <gutter>
+# Prints "<cpi> <total_chars>". Returns 1 when even the densest step cannot fit
+# the line, meaning build_page will wrap it.
+select_cpi() {
+    local -i widest=$1 gutter=$2 i
+    for (( i = 1; i <= ${#CPI_LADDER}; i++ )); do
+        if (( CPI_CHARS[i] - gutter >= widest )); then
+            print -r -- "${CPI_LADDER[i]} ${CPI_CHARS[i]}"
+            return 0
+        fi
+    done
+    print -r -- "${CPI_LADDER[-1]} ${CPI_CHARS[-1]}"
+    return 1
+}
+
+# build_page <label> <date> <total-chars>
+# Reads secret lines from stdin, prints the page. Pure: no side effects and no
+# globals beyond the cpi tables.
+build_page() {
+    local label="$1" date="$2"
+    local -i total=$3
+    local -a lines
+    local l seg rule=""
+    local -i n numbered gutter budget i rule_w first
+
+    while IFS= read -r l; do lines+=("$l"); done
+    n=${#lines}
+
+    numbered=0; (( n > 1 )) && numbered=1
+    gutter=0;   (( numbered )) && gutter=6
+    budget=$(( total - gutter ))
+
+    local joined="${(pj:\n:)lines}"
+    local sum="$(printf '%s' "$joined" | shasum -a 256 | cut -c1-8)"
+
+    rule_w=${#label}
+    (( rule_w < 50 )) && rule_w=50
+    (( rule_w > total )) && rule_w=$total
+    repeat $rule_w; do rule+="-"; done
+
+    print -r -- "$label"
+    print -r -- "$rule"
+    print -r -- "$date"
+    print -r -- ""
+
+    i=0
+    for l in "${lines[@]}"; do
+        (( i++ ))
+        first=1
+        while :; do
+            seg="${l[1,$budget]}"
+            l="${l[$(( budget + 1 )),-1]}"
+            if (( numbered )); then
+                if (( first )); then
+                    printf '%4d  %s\n' $i "$seg"
+                else
+                    printf '%4s  %s\n' '...' "$seg"
+                fi
+            else
+                printf '%s\n' "$seg"
+            fi
+            first=0
+            [[ -z "$l" ]] && break
+        done
+    done
+
+    print -r -- ""
+    print -r -- "sha256/8: ${sum}  (LF-joined, no trailing NL)"
+    print -r -- "0=zero  O=oh  1=one  l=ell  I=eye"
+    return 0
+}
+
+# lp_options <cpi>
+# sides=one-sided is mandatory, not cosmetic: the queue default is
+# *DuplexNoTumble, which would print copy 2 on the reverse of copy 1 and
+# silently defeat the purpose of making two copies for two locations.
+lp_options() {
+    print -rl -- "-o" "cpi=$1" "-o" "lpi=6" \
+                 "-o" "page-left=54" "-o" "page-right=54" \
+                 "-o" "page-top=54" "-o" "page-bottom=54" \
+                 "-o" "sides=one-sided"
+}
+
+# purge_completed_jobs <printer>
+# Scoped to one queue, and skipped if anything is still queued, so this can
+# never cancel an unrelated print.
+purge_completed_jobs() {
+    local printer="$1" pending
+    pending="$(lpstat -o "$printer" 2>/dev/null)"
+    if [[ -n "$pending" ]]; then
+        print -r -- "  Jobs still queued on $printer; skipping history purge." >&2
+        return 0
+    fi
+    cancel -x "$printer" 2>/dev/null || true
+    print -r -- "  Purged completed job history for $printer." >&2
+    return 0
+}
+
+# Sample content for --dry-run. Deliberately fixed: a dry-run that accepted a
+# real secret would write it in plaintext to a PDF on disk, which is precisely
+# what this script exists to prevent, reachable by one wrong flag.
+dry_run_sample() {
+    cat <<'SAMPLE'
+4fh2n8-xk3m2c
+9ap7q1-w4rte1
+m2x8v0-qq5nb7
+t7yc44-hd91zs
+b3kk09-rr2wme
+z0p1la-6tn4xu
+e5w7dd-oi3gvk
+s8n2mq-1cf6ry
+g4bt73-xz0jpe
+ILlO0o1i-ambiguity-sampler
+SAMPLE
+}
+
+do_dry_run() {
+    local out="${TMPDIR:-/tmp}/coldprint_dryrun_$$.pdf"
+    local -a lines opts
+    local l cpi total
+    local -i widest=0
+
+    lines=( ${(f)"$(dry_run_sample)"} )
+    for l in $lines; do (( ${#l} > widest )) && widest=${#l}; done
+
+    read -r cpi total <<< "$(select_cpi $widest 6)"
+    opts=( ${(f)"$(lp_options $cpi)"} )
+
+    # cupsfilter requires a filename and will not read stdin, so the page text
+    # must land on disk first. This is safe only because the dry run renders
+    # fixed sample content — it is the reason a real secret is never accepted
+    # here. The live print path pipes straight into lp and touches no file.
+    local src="${TMPDIR:-/tmp}/coldprint_dryrun_$$.txt"
+    print -rl -- $lines \
+        | build_page 'Dry run sample' "$(date '+%Y-%m-%d %H:%M')" $total > "$src"
+    cupsfilter -m application/pdf $opts "$src" > "$out" 2>/dev/null
+    rm -f "$src"
+
+    print -r -- "Dry run written to: $out" >&2
+    print -r -- "(sample content only; no secret was requested)" >&2
+    return 0
+}
+
+usage() {
+    cat >&2 <<'USAGE'
+coldprint — print a secret to paper for a continuity envelope.
+
+  coldprint [-P PRINTER] [-n COPIES]
+  coldprint --dry-run
+  coldprint -h
+
+  -P PRINTER   Use this queue, skipping the selection menu.
+  -n COPIES    Number of copies (default 1). Always one-sided.
+  --dry-run    Render sample content to a PDF and exit. Never asks for a secret.
+  -h           This help.
+
+Pause all backup, sync, and snapshot software before use.
+USAGE
+}
+
+main() {
+    local printer="" label="" reply cpi total
+    local -i copies=1 widest=0 gutter=0 wrap_needed=0
+    local -a lines warnings opts
+    local l
+
+    while (( $# )); do
+        case "$1" in
+            (-P) printer="${2:-}"; shift 2 ;;
+            (-n) copies="${2:-1}"; shift 2 ;;
+            (--dry-run) do_dry_run; return 0 ;;
+            (-h|--help) usage; return 0 ;;
+            (*) print -r -- "Unknown argument: $1" >&2; usage; return 1 ;;
+        esac
+    done
+
+    [[ "$copies" == <-> ]] && (( copies >= 1 )) || {
+        print -r -- "Copies must be a positive integer." >&2; return 1
+    }
+    [[ -t 0 ]] || {
+        print -r -- "A terminal is required: the secret is read with echo disabled." >&2
+        return 1
+    }
+
+    backup_banner
+    backup_gate || return 2
+
+    printer="$(select_printer "$printer")" || return 3
+
+    printf 'Label: ' >&2
+    IFS= read -r label || return 1
+    [[ -n "$label" ]] || { print -r -- "A label is required." >&2; return 1 }
+
+    print -r -- "Secret (blank line or Ctrl-D to finish):" >&2
+    lines=( ${(f)"$(read_secret_lines)"} )
+    (( ${#lines} )) || { print -r -- "A secret is required." >&2; return 1 }
+
+    print -r -- "" >&2
+    render_preview "$label" "${lines[@]}"
+
+    warnings=( ${(f)"$(flag_characters "${lines[@]}")"} )
+    if (( ${#warnings} )); then
+        print -r -- "" >&2
+        print -rl -- "  ! ${^warnings}" >&2
+    fi
+
+    for l in "${lines[@]}"; do (( ${#l} > widest )) && widest=${#l}; done
+    (( ${#lines} > 1 )) && gutter=6
+
+    # select_cpi reports the chosen size on stdout and whether wrapping is
+    # needed via exit status; both are wanted, so it is called twice.
+    read -r cpi total <<< "$(select_cpi $widest $gutter)"
+    select_cpi $widest $gutter >/dev/null || wrap_needed=1
+    if (( wrap_needed )); then
+        print -r -- "" >&2
+        print -r -- "  ! Longest line exceeds the page; it will wrap, marked by ... in the number column." >&2
+    fi
+
+    print -r -- "" >&2
+    printf '  Print %d cop%s to %s? [y/N]: ' \
+        $copies "$( (( copies == 1 )) && print -n y || print -n ies )" "$printer" >&2
+    IFS= read -r reply || return 0
+    [[ "$reply" == [yY] ]] || {
+        print -r -- "  Cancelled." >&2; unset lines label; return 0
+    }
+
+    opts=( ${(f)"$(lp_options $cpi)"} )
+    if ! print -rl -- "${lines[@]}" \
+        | build_page "$label" "$(date '+%Y-%m-%d %H:%M')" $total \
+        | lp -d "$printer" -n $copies $opts >/dev/null 2>&1
+    then
+        print -r -- "  Print submission failed." >&2
+        unset lines label
+        return 4
+    fi
+
+    # Drops the references. It does NOT zero the memory — shell cannot do that,
+    # and pretending otherwise would be worse than saying so.
+    unset lines label
+
+    print -r -- "" >&2
+    print -r -- "  Submitted to $printer." >&2
+    lpstat -o "$printer" 2>/dev/null >&2 || true
+
+    printf '\n  Press Enter once the page is in your hand... ' >&2
+    read -r _ || true
+
+    purge_completed_jobs "$printer"
+    clear
+    printf '\033[3J'
+    return 0
+}
+
+[[ -n "${COLDPRINT_LIB:-}" ]] || main "$@"

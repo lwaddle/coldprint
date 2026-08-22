@@ -1,0 +1,101 @@
+# coldprint
+
+Print a secret — a passphrase, a block of recovery codes — onto paper for a
+continuity envelope, without it touching disk, shell history, or an
+unencrypted network hop.
+
+    ./coldprint                 # select a printer, enter a secret
+    ./coldprint -P NAME -n 2    # named queue, two copies
+    ./coldprint --dry-run       # render sample content to a PDF
+
+## What it does for you
+
+- **Refuses to run while backup software is live.** Time Machine (including
+  armed-but-idle, which can fire mid-print), Backblaze, Arq, Carbon Copy
+  Cloner, ChronoSync, restic, borg, duplicati. Override requires typing
+  `OVERRIDE` in full — `y` will not do it.
+- **Warns unconditionally**, every run, even when nothing is detected. The
+  detector only knows the tools it knows.
+- **Refuses cleartext print transports** unless overridden the same way. A
+  `dnssd://` queue advertising `_ipp._tcp` is cleartext despite the scheme;
+  the script parses the service type, not just the URI prefix.
+- **Forces one-sided printing.** The queue default here is duplex, which would
+  put copy 2 on the back of copy 1 and defeat the point of two copies.
+- **Never echoes the secret**, disables bracketed paste, and strips
+  `ESC[200~`/`ESC[201~` if a terminal sends them anyway — tmux re-arms
+  bracketed paste, and those bytes would otherwise land silently inside the
+  secret.
+- **Shows you what you actually captured** — first and last two characters of
+  each line plus exact counts, so a wrong paste or a missing line is visible
+  without putting plaintext on screen.
+- **Never writes the secret to disk.** It exists in shell variables and pipes
+  only. (`--dry-run` does write a file, which is exactly why it refuses to
+  accept a real secret and renders fixed sample content instead.)
+
+## What it cannot do for you
+
+- **`/var/spool/cups`.** While the job prints, it exists there in cleartext.
+  This is unavoidable and is the entire reason the backup gate exists.
+- **Memory.** `unset` drops a reference; it does not zero memory. Shell cannot.
+- **Your clipboard.** If you paste from a password manager, the secret is in
+  the system clipboard, which is outside this script's reach.
+- **Terminal session logging.** If iTerm2's "Automatically log session to
+  files" is on, your session is being written to disk. Check
+  Settings → Profiles → Session. The script clears scrollback but cannot
+  un-write a log file.
+- **The printer's own memory**, and the output tray. Collect the page.
+
+## The printed page
+
+    Fastmail recovery codes
+    --------------------------------------------------
+    2026-08-21 22:22
+
+       1  4fh2n8-xk3m2c
+       2  9ap7q1-w4rte1
+       ...
+
+    sha256/8: 1fd05191  (LF-joined, no trailing NL)
+    0=zero  O=oh  1=one  l=ell  I=eye
+
+The date matters: recovery codes get regenerated, and two undated sheets in
+one envelope is a coin flip. The checksum prints its own recipe, because eight
+hex characters you cannot reproduce are decoration. The glyph legend is there
+so you can compare *this printer's* shapes against a reference when reading
+degraded toner years from now.
+
+Font is Monaco, chosen automatically by the CUPS text filter — slashed zero,
+`1` with a top flag and base serif, `l` with a tail. Glyph size steps down
+automatically (10/12/15/17 cpi) to fit the longest line. If a line is too long
+even then, it wraps, and the continuation is marked by `...` in the number
+column — never by a character appended to the secret itself.
+
+## Requirements
+
+macOS with zsh. No third-party dependencies: `lp`, `lpstat`, `cancel`,
+`cupsfilter`, `shasum`, `defaults`, `tmutil`, `pgrep`, and `stty` are all base
+system.
+
+## Tests
+
+    zsh tests/run_all.zsh
+
+54 tests covering transport classification, the backup gate, capture and paste
+handling, masking, and page layout.
+
+## Design notes
+
+[`docs/design.md`](docs/design.md) records the threat model and the reasoning
+behind each decision, including what was measured rather than assumed — how
+CUPS renders text, why PostScript was rejected, and why the backup gate cannot
+watch for `backupd`.
+
+## Contributing
+
+Issues and pull requests welcome. If you find a way to get a secret onto disk,
+onto the network in cleartext, or silently corrupted between the prompt and the
+page, that is the most useful bug you can report.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

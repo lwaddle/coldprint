@@ -75,6 +75,39 @@ Continuations are marked by `...` in the number column, never by a character
 appended to the secret itself. `--cpi 8` gives larger type; `--cpi 15` or `17`
 pack more per line if you prefer fewer wraps.
 
+## Verifying a transcription
+
+The `sha256/8` line answers one question: *did I type this back in correctly?*
+
+Restoring from paper means retyping the secret by hand with no feedback — the
+service just says "invalid", and you cannot tell a typo from an expired code.
+Check before you commit:
+
+    printf '%s' "$(cat)" | shasum -a 256 | cut -c1-8
+
+Type or paste the lines, press Ctrl-D, and compare to the page. Matching means
+you transcribed it correctly.
+
+    $ printf '%s' "$(cat)" | shasum -a 256 | cut -c1-8
+    aaa
+    bbb
+    ccc
+    ^D
+    8c802c52
+
+**The `(LF-joined, no trailing NL)` note on the page is the recipe, not a
+footnote.** Join the lines with newlines and do not add a trailing one. Getting
+that wrong produces a completely different hash — for the example above,
+including a trailing newline yields `e77229fd` instead of `8c802c52`, which
+looks exactly like a failed transcription. The `$(cat)` above handles this for
+you: command substitution strips trailing newlines while preserving everything
+else, including a trailing space on the last line.
+
+Two things this is not. Eight hex characters is 32 bits — ample for catching a
+typo (roughly one in four billion false accepts) but not a cryptographic
+integrity guarantee. And it cannot tell you the secret is still *valid*, only
+that it matches what was printed.
+
 ## Requirements
 
 macOS with zsh. No third-party dependencies: `lp`, `lpstat`, `cancel`,

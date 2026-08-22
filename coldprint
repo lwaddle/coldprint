@@ -78,6 +78,20 @@ detect_backup_agents() {
     return 0
 }
 
+# print_indented <prefix> <line>...
+# Prints each argument on its own line with the given prefix.
+#
+# A loop, not "${prefix}${^array}": inside double quotes the ^ flag collapses
+# back to a single word, so the whole list prints on one line. Dropping the
+# quotes instead would word-split entries that contain spaces.
+print_indented() {
+    local prefix="$1"; shift
+    local item
+    for item in "$@"; do
+        print -r -- "${prefix}${item}"
+    done
+}
+
 # backup_banner — Tier 1. Unconditional, every run, regardless of detection.
 backup_banner() {
     print -r -- "" >&2
@@ -98,7 +112,7 @@ backup_gate() {
     (( ${#live} )) || return 0
 
     print -r -- "  BLOCKED. These are live right now:" >&2
-    print -rl -- "    ${^live}" >&2
+    print_indented "    " "${live[@]}" >&2
     print -r -- "" >&2
     print -r -- "  Stop them, or type ${OVERRIDE_TOKEN} to print anyway." >&2
     printf '  > ' >&2
@@ -528,7 +542,7 @@ main() {
     warnings=( ${(f)"$(flag_characters "${lines[@]}")"} )
     if (( ${#warnings} )); then
         print -r -- "" >&2
-        print -rl -- "  ! ${^warnings}" >&2
+        print_indented "  ! " "${warnings[@]}" >&2
     fi
 
     for l in "${lines[@]}"; do (( ${#l} > widest )) && widest=${#l}; done

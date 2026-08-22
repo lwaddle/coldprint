@@ -48,4 +48,30 @@ Process: bzserv
 Process: ChronoSync" \
     "$(detect_backup_agents)"
 
+# --- display ------------------------------------------------------------
+# Regression: "${prefix}${^array}" inside double quotes collapses to a single
+# word, which put every live agent on one unreadable line.
+assert_eq "each item prints on its own line" \
+    "  ! one
+  ! two
+  ! three" \
+    "$(print_indented '  ! ' 'one' 'two' 'three')"
+
+assert_eq "entries containing spaces stay on one line each" \
+    "    Time Machine: AutoBackup is enabled
+    Process: bztransmit" \
+    "$(print_indented '    ' 'Time Machine: AutoBackup is enabled' 'Process: bztransmit')"
+
+assert_eq "a single item still works" \
+    "  x" "$(print_indented '  ' 'x')"
+
+assert_eq "no items prints nothing" \
+    "" "$(print_indented '  ')"
+
+# The gate itself must render one agent per line.
+detect_backup_agents() { print -rl -- "Agent one" "Agent two" "Agent three" }
+assert_eq "backup_gate lists each live agent on its own line" \
+    "3" \
+    "$(printf 'OVERRIDE\n' | backup_gate 2>&1 >/dev/null | grep -c '^    Agent')"
+
 finish

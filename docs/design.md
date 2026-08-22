@@ -220,13 +220,28 @@ only layout primitive the design needs.
 **Print options (all mandatory):**
 
     -o cpi=N
-    -o lpi=6
+    -o lpi=N          # 3/4/5/6, default 4
     -o page-left=54 -o page-right=54 -o page-top=54 -o page-bottom=54
     -o sides=one-sided
 
 `sides=one-sided` is **required, not cosmetic**. The queue's default is
 `*DuplexNoTumble`; with `-n 2` the second copy would print on the reverse of the
 first, silently destroying the purpose of making two copies for two locations.
+
+**Line spacing is leading only.** Measured 2026-08-22: a ten-character string
+is 72.01pt wide at every lpi, while the line pitch moves 12pt (lpi=6), 18pt
+(lpi=4), 24pt (lpi=3). So spacing and type size are independent controls, and
+the default moved from 6 to 4 after the first real print read as cramped.
+Inserting blank lines was rejected: it alters the content structure, and a
+blank line on a secret page raises the question of whether it belongs to the
+secret.
+
+**Page capacity is checked before printing.** Lower lpi means fewer lines per
+sheet — 57 at lpi=6 down to 28 at lpi=3 — so the overflow risk rises with the
+new default. A secret continuing onto a second sheet is a real hazard, because
+the sheets can be separated and half a secret is no secret. `rendered_lines`
+computes the wrapped line count and `main` warns when it plus the seven-line
+header and footer exceeds `page_capacity`.
 
 **Width budget.** Usable width is `612 - 54 - 54 = 504pt`. The line-number
 gutter (`%4d` plus two spaces) consumes 6 characters when the secret has more

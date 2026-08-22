@@ -344,6 +344,42 @@ render_preview() {
 typeset -gA CPI_BUDGET=( 8 56  10 70  12 84  15 105  17 119 )
 typeset -g  CPI_DEFAULT=10
 
+# Line spacing. lpi controls leading only: a 10-character string measures
+# 72.01pt at every lpi, while the line pitch moves 12pt (lpi=6) to 24pt
+# (lpi=3). Blank lines between entries would be the wrong tool — they change
+# the content structure, and a blank line on a secret page invites the question
+# of whether it is part of the secret.
+typeset -ga LPI_CHOICES=(3 4 5 6)
+typeset -g  LPI_DEFAULT=4
+
+# rendered_lines <budget> <line>...
+# Printed lines the secret occupies once wrapping is applied. An empty line
+# still occupies one.
+rendered_lines() {
+    local -i budget=$1; shift
+    local -i total=0 segs
+    local l
+    for l in "$@"; do
+        segs=$(( (${#l} + budget - 1) / budget ))
+        (( segs < 1 )) && segs=1
+        (( total += segs ))
+    done
+    print -r -- $total
+}
+
+# page_capacity <lpi>
+# Printable lines per page: 792pt of Letter height less 54pt margins top and
+# bottom, over the 72/lpi point line pitch.
+page_capacity() {
+    local -i lpi=$1
+    print -r -- $(( (792 - 54 - 54) * lpi / 72 ))
+}
+
+# lpi_ok <lpi>
+lpi_ok() {
+    [[ -n "${LPI_CHOICES[(r)$1]}" ]]
+}
+
 # cpi_budget <cpi>
 # Prints the printable characters per line at that cpi. Returns 1 if unknown.
 cpi_budget() {
@@ -432,12 +468,12 @@ build_page() {
     return 0
 }
 
-# lp_options <cpi>
+# lp_options <cpi> <lpi>
 # sides=one-sided is mandatory, not cosmetic: the queue default is
 # *DuplexNoTumble, which would print copy 2 on the reverse of copy 1 and
 # silently defeat the purpose of making two copies for two locations.
 lp_options() {
-    print -rl -- "-o" "cpi=$1" "-o" "lpi=6" \
+    print -rl -- "-o" "cpi=$1" "-o" "lpi=$2" \
                  "-o" "page-left=54" "-o" "page-right=54" \
                  "-o" "page-top=54" "-o" "page-bottom=54" \
                  "-o" "sides=one-sided"
@@ -479,15 +515,16 @@ SAMPLE
 do_dry_run() {
     local out="${TMPDIR:-/tmp}/coldprint_dryrun_$$.pdf"
     local -a lines opts
-    local l cpi total
+    local l cpi lpi total
     local -i widest=0
 
     lines=( ${(f)"$(dry_run_sample)"} )
     for l in $lines; do (( ${#l} > widest )) && widest=${#l}; done
 
     cpi="${1:-$CPI_DEFAULT}"
+    lpi="${2:-$LPI_DEFAULT}"
     total="$(cpi_budget $cpi)"
-    opts=( ${(f)"$(lp_options $cpi)"} )
+    opts=( ${(f)"$(lp_options $cpi $lpi)"} )
 
     # cupsfilter requires a filename and will not read stdin, so the page text
     # must land on disk first. This is safe only because the dry run renders
@@ -508,7 +545,7 @@ usage() {
     cat >&2 <<'USAGE'
 coldprint — print a secret to paper for a continuity envelope.
 
-  coldprint [-P PRINTER] [-n COPIES] [--cpi N]
+  coldprint [-P PRINTER] [-n COPIES] [--cpi N] [--lpi N]
   coldprint --dry-run
   coldprint -h
 
@@ -517,6 +554,8 @@ coldprint — print a secret to paper for a continuity envelope.
   --cpi N      Characters per inch: 8, 10, 12, 15 or 17 (default 10).
                Lower is larger type. Long lines wrap rather than shrink
                the whole page.
+  --lpi N      Lines per inch: 3, 4, 5 or 6 (default 4). Lower is more
+               space between lines; it does not change the type size.
   --dry-run    Render sample content to a PDF and exit. Never asks for a secret.
   -h           This help.
 
@@ -526,7 +565,7 @@ USAGE
 
 main() {
     local printer="" label="" reply total
-    local cpi="$CPI_DEFAULT"
+    local cpi="$CPI_DEFAULT" lpi="$LPI_DEFAULT"
     local -i copies=1 widest=0 gutter=0 wrap_needed=0
     local -a lines warnings opts
     local l
@@ -536,7 +575,8 @@ main() {
             (-P) printer="${2:-}"; shift 2 ;;
             (-n) copies="${2:-1}"; shift 2 ;;
             (--cpi) cpi="${2:-}"; shift 2 ;;
-            (--dry-run) shift; do_dry_run "${cpi:-$CPI_DEFAULT}"; return 0 ;;
+            (--lpi) lpi="${2:-}"; shift 2 ;;
+            (--dry-run) shift; do_dry_run "$cpi" "$lpi"; return 0 ;;
             (-h|--help) usage; return 0 ;;
             (*) print -r -- "Unknown argument: $1" >&2; usage; return 1 ;;
         esac
@@ -548,6 +588,11 @@ main() {
     cpi_budget "$cpi" >/dev/null || {
         print -r -- "Unsupported --cpi $cpi. Choose one of: $(cpi_choices)" >&2
         print -r -- "Lower is larger type; $CPI_DEFAULT is the default." >&2
+        return 1
+    }
+    lpi_ok "$lpi" || {
+        print -r -- "Unsupported --lpi $lpi. Choose one of: ${LPI_CHOICES}" >&2
+        print -r -- "Lower is more spacing between lines; $LPI_DEFAULT is the default." >&2
         return 1
     }
     [[ -t 0 ]] || {
@@ -581,10 +626,23 @@ main() {
     gutter="$(gutter_width ${#lines})"
 
     total="$(cpi_budget $cpi)"
-    if (( widest > total - gutter )); then
+    local -i budget=$(( total - gutter ))
+    if (( widest > budget )); then
         print -r -- "" >&2
         print -r -- "  ! Longest line exceeds the page width at cpi=$cpi; it will wrap," >&2
         print -r -- "    marked by ... in the number column. Use --cpi for denser text." >&2
+    fi
+
+    # A secret continuing onto a second sheet is a real hazard: the sheets can
+    # be separated, and half a secret is no secret. Warn before printing, not
+    # after.
+    # label, rule, date, blank, <content>, blank, checksum, legend
+    local -i needed=$(( $(rendered_lines $budget "${lines[@]}") + 7 ))
+    local -i capacity="$(page_capacity $lpi)"
+    if (( needed > capacity )); then
+        print -r -- "" >&2
+        print -r -- "  ! Needs $needed lines; only $capacity fit a page at lpi=$lpi." >&2
+        print -r -- "    This will run onto a second sheet. --lpi 6 or --cpi 12 to fit one." >&2
     fi
 
     print -r -- "" >&2
@@ -595,7 +653,7 @@ main() {
         print -r -- "  Cancelled." >&2; unset lines label; return 0
     }
 
-    opts=( ${(f)"$(lp_options $cpi)"} )
+    opts=( ${(f)"$(lp_options $cpi $lpi)"} )
     if ! print -rl -- "${lines[@]}" \
         | build_page "$label" "$(date '+%Y-%m-%d %H:%M')" $total \
         | lp -d "$printer" -n $copies $opts >/dev/null 2>&1

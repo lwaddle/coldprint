@@ -13,6 +13,32 @@ cpi_budget 9  >/dev/null 2>&1; assert_status "unsupported cpi rejected" 1 $?
 cpi_budget 10 >/dev/null 2>&1; assert_status "supported cpi accepted"   0 $?
 assert_eq "choices are offered largest-type first" "8 10 12 15 17" "$(cpi_choices)"
 
+# --- line spacing ----------------------------------------------------------
+# lpi is leading only: glyph width measures 72.01pt for 10 characters at every
+# lpi, while the line pitch moves 12pt (lpi=6) to 24pt (lpi=3).
+assert_eq "default leaves breathing room" "4" "$LPI_DEFAULT"
+assert_eq "lpi 6 capacity" "57" "$(page_capacity 6)"
+assert_eq "lpi 5 capacity" "47" "$(page_capacity 5)"
+assert_eq "lpi 4 capacity" "38" "$(page_capacity 4)"
+assert_eq "lpi 3 capacity" "28" "$(page_capacity 3)"
+lpi_ok 4 && assert_status "supported lpi accepted" 0 0 || assert_status "supported lpi accepted" 0 1
+lpi_ok 7 && assert_status "unsupported lpi rejected" 1 0 || assert_status "unsupported lpi rejected" 1 1
+
+assert_eq "short lines occupy one printed line each" \
+    "3" "$(rendered_lines 64 'aaa' 'bbb' 'ccc')"
+assert_eq "a line at exactly the budget does not wrap" \
+    "1" "$(rendered_lines 10 'ABCDEFGHIJ')"
+assert_eq "one over the budget takes two printed lines" \
+    "2" "$(rendered_lines 10 'ABCDEFGHIJK')"
+assert_eq "a 120-char line at cpi=10 takes two printed lines" \
+    "2" "$(rendered_lines 64 \"$(printf 'x%.0s' {1..120})\")"
+assert_eq "mixed lengths sum correctly" \
+    "4" "$(rendered_lines 10 'short' 'ABCDEFGHIJKLMNOPQRSTUVWXY')"
+
+assert_eq "lp_options carries the requested lpi and forces one-sided" \
+    "cpi=10 lpi=4 sides=one-sided" \
+    "$(lp_options 10 4 | grep -E '^(cpi|lpi|sides)=' | tr '\n' ' ' | sed 's/ $//')"
+
 # --- gutter ---------------------------------------------------------------
 # Bare ordinals read as part of a numeric secret, so markers are parenthesised.
 assert_eq "single line carries no gutter"       "0" "$(gutter_width 1)"

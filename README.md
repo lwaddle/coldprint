@@ -7,6 +7,7 @@ unencrypted network hop.
     ./coldprint                 # select a printer, enter a secret
     ./coldprint -P NAME -n 2    # named queue, two copies
     ./coldprint --cpi 8         # larger type
+    ./coldprint --lpi 3         # more space between lines
     ./coldprint --dry-run       # render sample content to a PDF
 
 ## What it does for you
@@ -76,6 +77,18 @@ all-numeric secret an unadorned ordinal separated only by spaces reads as
 part of the code. Continuations are marked by `...` in the number column, never by a character
 appended to the secret itself. `--cpi 8` gives larger type; `--cpi 15` or `17`
 pack more per line if you prefer fewer wraps.
+
+Line spacing is separate. `--lpi` (3, 4, 5 or 6; default 4) changes the
+leading **without** changing the type size — verified: a ten-character string
+measures 72.01pt at every setting while the line pitch moves from 12pt at
+`--lpi 6` to 24pt at `--lpi 3`. Adding blank lines between entries would be
+the wrong tool: it changes the content structure, and a blank line on a
+secret page invites the question of whether it is part of the secret.
+
+Spacing costs page room, so coldprint warns before printing if the secret
+will not fit one sheet — 31 printed lines at the default, fewer at `--lpi 3`.
+A secret spanning two sheets is a hazard: sheets get separated, and half a
+secret is no secret.
 
 ## Verifying a transcription
 

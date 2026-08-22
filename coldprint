@@ -336,22 +336,25 @@ render_preview() {
 # Usable width is 612pt - 54pt - 54pt = 504pt; a character is 72/cpi points.
 # Verified empirically: a 10-character string measures 72.01pt at cpi=10 and
 # 60.01pt at cpi=12.
-typeset -ga CPI_LADDER=(10 12 15 17)
-typeset -ga CPI_CHARS=(70 84 105 119)
+#
+# The default favours legibility over avoiding wraps. Shrinking the whole page
+# so one long line fits penalises every other line, and past a certain length
+# it wraps anyway — paying in readability for nothing. Wrapping is already
+# unambiguous because continuations are marked in the number column.
+typeset -gA CPI_BUDGET=( 8 56  10 70  12 84  15 105  17 119 )
+typeset -g  CPI_DEFAULT=10
 
-# select_cpi <widest-line> <gutter>
-# Prints "<cpi> <total_chars>". Returns 1 when even the densest step cannot fit
-# the line, meaning build_page will wrap it.
-select_cpi() {
-    local -i widest=$1 gutter=$2 i
-    for (( i = 1; i <= ${#CPI_LADDER}; i++ )); do
-        if (( CPI_CHARS[i] - gutter >= widest )); then
-            print -r -- "${CPI_LADDER[i]} ${CPI_CHARS[i]}"
-            return 0
-        fi
-    done
-    print -r -- "${CPI_LADDER[-1]} ${CPI_CHARS[-1]}"
-    return 1
+# cpi_budget <cpi>
+# Prints the printable characters per line at that cpi. Returns 1 if unknown.
+cpi_budget() {
+    local c="$1"
+    [[ -n "${CPI_BUDGET[$c]:-}" ]] || return 1
+    print -r -- "${CPI_BUDGET[$c]}"
+}
+
+# cpi_choices — the accepted values, smallest cpi (largest glyphs) first.
+cpi_choices() {
+    print -r -- "8 10 12 15 17"
 }
 
 # build_page <label> <date> <total-chars>
@@ -464,7 +467,8 @@ do_dry_run() {
     lines=( ${(f)"$(dry_run_sample)"} )
     for l in $lines; do (( ${#l} > widest )) && widest=${#l}; done
 
-    read -r cpi total <<< "$(select_cpi $widest 6)"
+    cpi="${1:-$CPI_DEFAULT}"
+    total="$(cpi_budget $cpi)"
     opts=( ${(f)"$(lp_options $cpi)"} )
 
     # cupsfilter requires a filename and will not read stdin, so the page text
@@ -486,12 +490,15 @@ usage() {
     cat >&2 <<'USAGE'
 coldprint — print a secret to paper for a continuity envelope.
 
-  coldprint [-P PRINTER] [-n COPIES]
+  coldprint [-P PRINTER] [-n COPIES] [--cpi N]
   coldprint --dry-run
   coldprint -h
 
   -P PRINTER   Use this queue, skipping the selection menu.
   -n COPIES    Number of copies (default 1). Always one-sided.
+  --cpi N      Characters per inch: 8, 10, 12, 15 or 17 (default 10).
+               Lower is larger type. Long lines wrap rather than shrink
+               the whole page.
   --dry-run    Render sample content to a PDF and exit. Never asks for a secret.
   -h           This help.
 
@@ -500,7 +507,8 @@ USAGE
 }
 
 main() {
-    local printer="" label="" reply cpi total
+    local printer="" label="" reply total
+    local cpi="$CPI_DEFAULT"
     local -i copies=1 widest=0 gutter=0 wrap_needed=0
     local -a lines warnings opts
     local l
@@ -509,7 +517,8 @@ main() {
         case "$1" in
             (-P) printer="${2:-}"; shift 2 ;;
             (-n) copies="${2:-1}"; shift 2 ;;
-            (--dry-run) do_dry_run; return 0 ;;
+            (--cpi) cpi="${2:-}"; shift 2 ;;
+            (--dry-run) shift; do_dry_run "${cpi:-$CPI_DEFAULT}"; return 0 ;;
             (-h|--help) usage; return 0 ;;
             (*) print -r -- "Unknown argument: $1" >&2; usage; return 1 ;;
         esac
@@ -517,6 +526,11 @@ main() {
 
     [[ "$copies" == <-> ]] && (( copies >= 1 )) || {
         print -r -- "Copies must be a positive integer." >&2; return 1
+    }
+    cpi_budget "$cpi" >/dev/null || {
+        print -r -- "Unsupported --cpi $cpi. Choose one of: $(cpi_choices)" >&2
+        print -r -- "Lower is larger type; $CPI_DEFAULT is the default." >&2
+        return 1
     }
     [[ -t 0 ]] || {
         print -r -- "A terminal is required: the secret is read with echo disabled." >&2
@@ -548,13 +562,11 @@ main() {
     for l in "${lines[@]}"; do (( ${#l} > widest )) && widest=${#l}; done
     (( ${#lines} > 1 )) && gutter=6
 
-    # select_cpi reports the chosen size on stdout and whether wrapping is
-    # needed via exit status; both are wanted, so it is called twice.
-    read -r cpi total <<< "$(select_cpi $widest $gutter)"
-    select_cpi $widest $gutter >/dev/null || wrap_needed=1
-    if (( wrap_needed )); then
+    total="$(cpi_budget $cpi)"
+    if (( widest > total - gutter )); then
         print -r -- "" >&2
-        print -r -- "  ! Longest line exceeds the page; it will wrap, marked by ... in the number column." >&2
+        print -r -- "  ! Longest line exceeds the page width at cpi=$cpi; it will wrap," >&2
+        print -r -- "    marked by ... in the number column. Use --cpi for denser text." >&2
     fi
 
     print -r -- "" >&2

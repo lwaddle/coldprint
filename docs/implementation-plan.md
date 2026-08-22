@@ -1,5 +1,10 @@
 # coldprint Implementation Plan
 
+> **Historical record.** This is the plan as executed, kept for the reasoning
+> it captures. Where it differs from the current code the code is correct —
+> notably the cpi ladder, which was replaced by a fixed default after the
+> first real print. See [design.md](design.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** A zsh script that prints a single- or multi-line secret to paper for a continuity envelope, gating on active backup software and refusing cleartext print transports.

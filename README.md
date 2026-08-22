@@ -6,6 +6,7 @@ unencrypted network hop.
 
     ./coldprint                 # select a printer, enter a secret
     ./coldprint -P NAME -n 2    # named queue, two copies
+    ./coldprint --cpi 8         # larger type
     ./coldprint --dry-run       # render sample content to a PDF
 
 ## What it does for you
@@ -65,10 +66,14 @@ so you can compare *this printer's* shapes against a reference when reading
 degraded toner years from now.
 
 Font is Monaco, chosen automatically by the CUPS text filter — slashed zero,
-`1` with a top flag and base serif, `l` with a tail. Glyph size steps down
-automatically (10/12/15/17 cpi) to fit the longest line. If a line is too long
-even then, it wraps, and the continuation is marked by `...` in the number
-column — never by a character appended to the secret itself.
+`1` with a top flag and base serif, `l` with a tail.
+
+Type is set at `cpi=10` and long lines **wrap** rather than shrinking the page.
+Shrinking to fit the longest line penalises every other line, and past a
+certain length it wraps anyway — so it costs readability and buys nothing.
+Continuations are marked by `...` in the number column, never by a character
+appended to the secret itself. `--cpi 8` gives larger type; `--cpi 15` or `17`
+pack more per line if you prefer fewer wraps.
 
 ## Requirements
 

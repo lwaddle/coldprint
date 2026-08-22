@@ -233,8 +233,18 @@ than one line.
 | 15 | 4.80 | 105 | 99 |
 | 17 | 4.24 | 119 | 113 |
 
-Select the **smallest** cpi (largest glyphs) whose budget fits the longest line.
-Past `cpi=17`, hard-wrap.
+**The default is a fixed `cpi=10`, not a fit-search.** Revised 2026-08-22
+after the first real print. The original design stepped down the ladder until
+the longest line fit without wrapping. On a page holding one 120-character
+secret alongside a 32-character one, that selected `cpi=17` — shrinking *every*
+line to accommodate the longest — and then wrapped anyway, because 120 exceeds
+even the 113-character budget at that size. The page paid in legibility across
+the board and got a wrap regardless.
+
+Legibility now wins: print at `cpi=10` and wrap what does not fit. Wrapping is
+already unambiguous (see below), so there is nothing to buy by shrinking.
+`--cpi` accepts 8, 10, 12, 15 or 17 for a reader who wants larger type or
+denser packing; `--cpi 8` is effectively a large-print mode.
 
 **Wrapping uses the gutter, not an in-band marker.** A continuation line prints
 `...` in the number column instead of a digit. This avoids appending any

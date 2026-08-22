@@ -2,15 +2,16 @@
 source ${0:A:h}/helpers.zsh
 COLDPRINT_LIB=1 source ${0:A:h}/../coldprint
 
-# --- cpi selection -------------------------------------------------------
-assert_eq "short line takes the largest glyphs" "10 70" "$(select_cpi 20 6)"
-assert_eq "exactly at the cpi=10 numbered budget" "10 70" "$(select_cpi 64 6)"
-assert_eq "one over cpi=10 steps to cpi=12" "12 84" "$(select_cpi 65 6)"
-assert_eq "unnumbered gets the full width at cpi=10" "10 70" "$(select_cpi 70 0)"
-assert_eq "wide line lands on cpi=15" "15 105" "$(select_cpi 99 6)"
-assert_eq "very wide line lands on cpi=17" "17 119" "$(select_cpi 113 6)"
-select_cpi 200 6 >/dev/null; assert_status "over-budget signals wrapping" 1 $?
-select_cpi 20 6  >/dev/null; assert_status "in-budget signals no wrapping" 0 $?
+# --- cpi budgets ---------------------------------------------------------
+assert_eq "default favours legibility, not density" "10" "$CPI_DEFAULT"
+assert_eq "cpi 8 budget"  "56"  "$(cpi_budget 8)"
+assert_eq "cpi 10 budget" "70"  "$(cpi_budget 10)"
+assert_eq "cpi 12 budget" "84"  "$(cpi_budget 12)"
+assert_eq "cpi 15 budget" "105" "$(cpi_budget 15)"
+assert_eq "cpi 17 budget" "119" "$(cpi_budget 17)"
+cpi_budget 9  >/dev/null 2>&1; assert_status "unsupported cpi rejected" 1 $?
+cpi_budget 10 >/dev/null 2>&1; assert_status "supported cpi accepted"   0 $?
+assert_eq "choices are offered largest-type first" "8 10 12 15 17" "$(cpi_choices)"
 
 # --- page layout ---------------------------------------------------------
 # Checksum is sha256 over the LF-joined lines with no trailing newline.

@@ -357,6 +357,23 @@ cpi_choices() {
     print -r -- "8 10 12 15 17"
 }
 
+# gutter_width <line-count>
+# Width of the number column including its trailing gap, or 0 when the secret
+# is a single line and carries no numbering.
+#
+# Markers are parenthesised — "(1)" rather than a bare "1" — because with a
+# numeric secret a bare ordinal separated only by spaces reads as part of the
+# code. Parentheses delimit on both sides so the marker cannot bind to adjacent
+# digits. The field is at least 4 wide so "..." continuations align, and grows
+# for three-digit counts rather than silently overflowing the line budget.
+gutter_width() {
+    local n="$1"
+    local -i w=4
+    (( n <= 1 )) && { print -r -- 0; return 0 }
+    (( ${#n} + 2 > w )) && w=$(( ${#n} + 2 ))
+    print -r -- $(( w + 2 ))
+}
+
 # build_page <label> <date> <total-chars>
 # Reads secret lines from stdin, prints the page. Pure: no side effects and no
 # globals beyond the cpi tables.
@@ -365,13 +382,14 @@ build_page() {
     local -i total=$3
     local -a lines
     local l seg rule=""
-    local -i n numbered gutter budget i rule_w first
+    local -i n numbered gutter marker_w budget i rule_w first
 
     while IFS= read -r l; do lines+=("$l"); done
     n=${#lines}
 
     numbered=0; (( n > 1 )) && numbered=1
-    gutter=0;   (( numbered )) && gutter=6
+    gutter="$(gutter_width $n)"
+    marker_w=$(( gutter > 0 ? gutter - 2 : 0 ))
     budget=$(( total - gutter ))
 
     local joined="${(pj:\n:)lines}"
@@ -396,9 +414,9 @@ build_page() {
             l="${l[$(( budget + 1 )),-1]}"
             if (( numbered )); then
                 if (( first )); then
-                    printf '%4d  %s\n' $i "$seg"
+                    printf '%*s  %s\n' $marker_w "($i)" "$seg"
                 else
-                    printf '%4s  %s\n' '...' "$seg"
+                    printf '%*s  %s\n' $marker_w '...' "$seg"
                 fi
             else
                 printf '%s\n' "$seg"
@@ -560,7 +578,7 @@ main() {
     fi
 
     for l in "${lines[@]}"; do (( ${#l} > widest )) && widest=${#l}; done
-    (( ${#lines} > 1 )) && gutter=6
+    gutter="$(gutter_width ${#lines})"
 
     total="$(cpi_budget $cpi)"
     if (( widest > total - gutter )); then

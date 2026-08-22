@@ -174,7 +174,13 @@ Layout:
 
 - **Date** is mandatory. Recovery codes get regenerated; two undated sheets in
   one envelope is a coin flip.
-- **Line numbers** appear only when the secret has more than one line.
+- **Line numbers** appear only when the secret has more than one line, and
+  are parenthesised — `(1)`, never a bare `1`. Found on the first real print
+  of numeric recovery codes: `   1  48273910` separates the ordinal from the
+  content with nothing but whitespace, which is the weakest possible
+  delimiter when both sides are digits. Parentheses delimit on both sides so
+  the marker cannot bind to an adjacent digit. The field widens past 99 lines
+  rather than overflowing the width budget.
 - **Checksum** is the first 8 hex characters of `sha256` over the lines joined
   with LF and no trailing newline. The recipe is printed alongside it — an
   unreproducible checksum is decoration.

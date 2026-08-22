@@ -52,9 +52,9 @@ unencrypted network hop.
     --------------------------------------------------
     2026-08-21 22:22
 
-       1  4fh2n8-xk3m2c
-       2  9ap7q1-w4rte1
-       ...
+     (1)  4fh2n8-xk3m2c
+     (2)  9ap7q1-w4rte1
+     ...
 
     sha256/8: 1fd05191  (LF-joined, no trailing NL)
     0=zero  O=oh  1=one  l=ell  I=eye
@@ -71,7 +71,9 @@ Font is Monaco, chosen automatically by the CUPS text filter — slashed zero,
 Type is set at `cpi=10` and long lines **wrap** rather than shrinking the page.
 Shrinking to fit the longest line penalises every other line, and past a
 certain length it wraps anyway — so it costs readability and buys nothing.
-Continuations are marked by `...` in the number column, never by a character
+Line numbers are parenthesised — `(1)`, not a bare `1` — because with an
+all-numeric secret an unadorned ordinal separated only by spaces reads as
+part of the code. Continuations are marked by `...` in the number column, never by a character
 appended to the secret itself. `--cpi 8` gives larger type; `--cpi 15` or `17`
 pack more per line if you prefer fewer wraps.
 

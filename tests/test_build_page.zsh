@@ -13,6 +13,17 @@ cpi_budget 9  >/dev/null 2>&1; assert_status "unsupported cpi rejected" 1 $?
 cpi_budget 10 >/dev/null 2>&1; assert_status "supported cpi accepted"   0 $?
 assert_eq "choices are offered largest-type first" "8 10 12 15 17" "$(cpi_choices)"
 
+# --- gutter ---------------------------------------------------------------
+# Bare ordinals read as part of a numeric secret, so markers are parenthesised.
+assert_eq "single line carries no gutter"       "0" "$(gutter_width 1)"
+assert_eq "two lines get the base gutter"       "6" "$(gutter_width 2)"
+assert_eq "two-digit counts still fit the base" "6" "$(gutter_width 99)"
+assert_eq "three-digit counts widen the field"  "7" "$(gutter_width 100)"
+
+assert_eq "markers are parenthesised, not bare" \
+    " (1)  8273910" \
+    "$(printf '8273910\n9182736\n' | build_page 'N' '2026-08-22 08:15' 70 | sed -n 5p)"
+
 # --- page layout ---------------------------------------------------------
 # Checksum is sha256 over the LF-joined lines with no trailing newline.
 SUM_MULTI="$(printf '%s' 'aaa
@@ -23,8 +34,8 @@ assert_eq "multi-line page is numbered and carries metadata" \
 --------------------------------------------------
 2026-08-21 21:45
 
-   1  aaa
-   2  bbb
+ (1)  aaa
+ (2)  bbb
 
 sha256/8: ${SUM_MULTI}  (LF-joined, no trailing NL)
 0=zero  O=oh  1=one  l=ell  I=eye" \
@@ -51,9 +62,9 @@ assert_eq "over-width line wraps into the gutter" \
 ----------------
 2026-08-21 21:45
 
-   1  ABCDEFGHIJ
+ (1)  ABCDEFGHIJ
  ...  KLMNO
-   2  short
+ (2)  short
 
 sha256/8: ${SUM_WRAP}  (LF-joined, no trailing NL)
 0=zero  O=oh  1=one  l=ell  I=eye" \

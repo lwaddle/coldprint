@@ -133,6 +133,9 @@ pasted burst and hand-typed lines identically.
   trailing space can be legitimate in a passphrase, and silent mutation of a
   secret is worse than an ugly one. Non-ASCII is a layout warning, not a
   legibility one: it prints correctly but invalidates the cpi width table (§5).
+- **Duplicate lines are flagged** (`line 5 duplicates line 2 (double paste?)`).
+  A double paste of the same block is easy to do blind — echo is off — and the
+  masked preview of identical lines looks unremarkable.
 - Label is a separate single-line prompt, echoed normally.
 - Empty label or empty secret is an error.
 
@@ -162,36 +165,58 @@ Warnings for flagged characters appear here, before the print confirmation.
 Layout:
 
     Fastmail recovery codes
-    ───────────────────────
+    ──────────────────────────────
     2026-08-21 21:45
 
-      1  4fh2n8-xk3m2c
-      2  9ap7q1-w4rte1
+     (1)  4fh2n8-xk3m2c
+     (2)  9ap7q1-w4rte1
       ...
 
-    sha256/8: 3f9a2c1e (LF-joined, no trailing NL)
-    0=zero O=oh 1=one l=ell I=eye
+    ──────────────────────────────
+    10 lines, 130 chars
+    sha256/8: 3f9a2c1e  (LF-joined, no trailing NL)
+    0=zero  1=one  2=two  5=five  9=nine  -=hyphen
 
 - **Date** is mandatory. Recovery codes get regenerated; two undated sheets in
   one envelope is a coin flip.
+- **The secret block is closed by a second rule.** Everything between the two
+  rules is the secret, character for character. Without it the content
+  trailed into a blank line and then the checksum, and nothing marked where
+  the secret *ended*.
+- **The footer states the expected shape** — `10 lines, 130 chars` — so a
+  torn or cut-off sheet is detectable from the page alone, and a
+  transcription can be length-checked before hashing.
 - **Line numbers** appear only when the secret has more than one line, and
   are parenthesised — `(1)`, never a bare `1`. Found on the first real print
   of numeric recovery codes: `   1  48273910` separates the ordinal from the
   content with nothing but whitespace, which is the weakest possible
   delimiter when both sides are digits. Parentheses delimit on both sides so
   the marker cannot bind to an adjacent digit. The field widens past 99 lines
-  rather than overflowing the width budget.
+  rather than overflowing the width budget. A single-line secret carries no
+  gutter — unless it wraps, in which case numbering is forced so the
+  continuation marker stays visible.
 - **Checksum** is the first 8 hex characters of `sha256` over the lines joined
   with LF and no trailing newline. The recipe is printed alongside it — an
   unreproducible checksum is decoration.
-- **Glyph legend** is one line and is kept even for a self-reader. Its purpose
-  is not to teach `0` vs `O` but to provide this printer's actual glyph shapes
-  as a side-by-side reference when reading degraded toner years later.
-
-**Font sizing.** Monospace. Select the largest size from 12/11/10/9/8pt whose
-longest secret line fits the usable width. Below 8pt, hard-wrap with a visible
-continuation marker (`↳`) and say so in the preview. A silently wrapped secret
-is a corrupt secret; wrapping must always be visible.
+- **Glyph legend** is built from the secret: only the ambiguous glyphs
+  actually present are listed, from the canonical set
+  `0 O 1 l I 2 Z 5 S 8 B 9 g q - _`, grouped by confusable cluster. Its
+  purpose is not to teach `0` vs `O` but to provide this printer's actual
+  glyph shapes as a side-by-side reference when reading degraded toner years
+  later — an entry for a glyph the secret does not contain is noise, and a
+  secret with none gets no legend at all. The legend wraps between entries
+  when it outgrows the printable width.
+- **Invisible characters are noted in ink.** Trailing whitespace and tabs
+  print invisibly, yet the checksum includes them — a transcription that
+  omits one fails the hash with nothing on the page explaining why. The
+  capture-time screen warning protects the author; a printed
+  `note: line 3 ends with whitespace (part of the secret)` protects the
+  reader.
+- **`--counts` (opt-in)** adds a right-aligned `(nn)` column — each source
+  line's character count, on its last printed segment — so a mistranscribed
+  line is localised directly instead of bisecting the whole-page hash. This
+  is txt4print's per-line CRC idea, reduced to something a human can verify
+  by counting. Opt-in because it is one more column of ink on every line.
 
 **Output format: RESOLVED — plain text piped to `lp`.** Settled empirically on
 2026-08-21 against macOS 26 / CUPS 2.3.x; evidence below.
@@ -236,12 +261,28 @@ Inserting blank lines was rejected: it alters the content structure, and a
 blank line on a secret page raises the question of whether it belongs to the
 secret.
 
-**Page capacity is checked before printing.** Lower lpi means fewer lines per
-sheet — 57 at lpi=6 down to 28 at lpi=3 — so the overflow risk rises with the
-new default. A secret continuing onto a second sheet is a real hazard, because
-the sheets can be separated and half a secret is no secret. `rendered_lines`
-computes the wrapped line count and `main` warns when it plus the seven-line
-header and footer exceeds `page_capacity`.
+**Page capacity is checked before printing, and spills are paginated, not
+suffered.** Lower lpi means fewer lines per sheet — 57 at lpi=6 down to 28 at
+lpi=3 — so the overflow risk rises with the lpi=4 default. A secret
+continuing onto a second sheet is a real hazard, because the sheets can be
+separated and half a secret is no secret. `main` warns before printing; if
+the user prints anyway, `build_page` splits the sheets itself with form feeds
+rather than letting the CUPS filter break the page blind. Every sheet repeats
+the label, rule, and date with a `(sheet k of K)` marker, so a separated
+sheet is self-identifying; the footer prints on the last sheet, or on a sheet
+of its own when the rows fill every earlier one.
+
+Two facts about `cgtexttopdf`, both established empirically 2026-08-23:
+it honours `\f` as a page break, and its own break math matches
+`page_capacity` exactly (38 lines at lpi=4). The corollary bit during
+implementation: a form feed arriving when the page is *exactly* full produces
+a blank sheet, because the filter has already broken the page on its own. A
+sheet followed by a form feed therefore holds at most `capacity - 1` lines;
+only the last sheet may fill completely.
+
+`main` derives its warnings (wrap, sheet count) from the rendered page text
+itself rather than from a parallel computation, so what is warned about is
+what will print.
 
 **Width budget.** Usable width is `612 - 54 - 54 = 504pt`. The line-number
 gutter (`%4d` plus two spaces) consumes 6 characters when the secret has more
@@ -283,6 +324,17 @@ uses ASCII `-` for the same reason.
 **Dry-run rendering** uses `cupsfilter -m application/pdf` with the identical
 option set, so what is inspected is what would print.
 
+### 5a. Envelope slip (`--envelope`)
+
+A second, one-page job printed after the secret page: label, date, shape,
+checksum — never the secret — closed with `(envelope slip; contains no
+secret)` so future-me knows the paper is safe to leave outside. Taped to or
+tucked against the envelope, it answers "which envelope is this, and were its
+contents superseded?" without breaking a seal. It contains nothing sensitive,
+so a submission failure is reported but does not abort the post-print
+hygiene; it prints in the same copy count as the secret page — two envelopes
+need two slips.
+
 ### 6. Post-print
 
 1. `lpstat -o` for the chosen printer; wait for Enter.
@@ -302,7 +354,9 @@ exists to prevent, reachable by one wrong flag. Sample content is shaped like
 realistic recovery codes so margins and font selection can be tuned honestly.
 
 Output goes to `$TMPDIR`, never the project directory, so it cannot be
-committed by accident.
+committed by accident. Each run removes its predecessors (everything matching
+the `coldprint_dryrun_*` namespace) before rendering, so at most the newest
+sample survives — they used to pile up one per run.
 
 ## Removed from the original script
 
@@ -330,7 +384,8 @@ Single zsh file. Dependencies are base macOS only: `lp`, `lpstat`, `cancel`,
 `build_page` is pure by design — no I/O, no globals — so it can be exercised
 with dummy input from a test harness and from `--dry-run` without a printer.
 
-Flags: `-P NAME`, `-n COPIES` (default 1), `--dry-run`, `-h`.
+Flags: `-P NAME`, `-n COPIES` (default 1), `--cpi N`, `--lpi N`, `--counts`,
+`--envelope`, `--dry-run`, `-h`.
 
 Exit codes: `0` success or user cancel; `1` usage/validation error; `2` backup
 gate refused; `3` printer selection refused; `4` print submission failed.

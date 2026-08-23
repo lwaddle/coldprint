@@ -8,6 +8,8 @@ unencrypted network hop.
     ./coldprint -P NAME -n 2    # named queue, two copies
     ./coldprint --cpi 8         # larger type
     ./coldprint --lpi 3         # more space between lines
+    ./coldprint --counts        # per-line character counts on the page
+    ./coldprint --envelope      # also print a no-secret slip for the envelope
     ./coldprint --dry-run       # render sample content to a PDF
 
 ## What it does for you
@@ -57,14 +59,37 @@ unencrypted network hop.
      (2)  9ap7q1-w4rte1
      ...
 
+    --------------------------------------------------
+    10 lines, 130 chars
     sha256/8: 1fd05191  (LF-joined, no trailing NL)
-    0=zero  O=oh  1=one  l=ell  I=eye
+    0=zero  1=one  2=two  5=five  9=nine  -=hyphen
 
-The date matters: recovery codes get regenerated, and two undated sheets in
-one envelope is a coin flip. The checksum prints its own recipe, because eight
-hex characters you cannot reproduce are decoration. The glyph legend is there
-so you can compare *this printer's* shapes against a reference when reading
-degraded toner years from now.
+The secret is bounded by the two rules: everything between them is the
+secret, character for character. The date matters: recovery codes get
+regenerated, and two undated sheets in one envelope is a coin flip. The
+footer states the expected shape — `10 lines, 130 chars` — so a torn or
+cut-off page is detectable from the page alone, and a transcription can be
+length-checked before hashing. The checksum prints its own recipe, because
+eight hex characters you cannot reproduce are decoration.
+
+The glyph legend is there so you can compare *this printer's* shapes against
+a reference when reading degraded toner years from now — and it is built from
+the secret itself: only the ambiguous glyphs actually present are listed
+(from the set `0 O 1 l I 2 Z 5 S 8 B 9 g q - _`), so a digits-only secret
+gets a short legend and a base64 blob gets the full set.
+
+Characters that print invisibly are named in ink. A trailing space or a tab
+is part of the secret and part of the checksum; a screen warning at capture
+time protects whoever printed the page, but only a printed
+`note: line 3 ends with whitespace (part of the secret)` protects whoever
+reads it years later.
+
+`--counts` adds a right-hand column with each line's character count, so a
+mistranscribed line can be found directly instead of bisecting the page
+checksum. `--envelope` prints a second slip — label, date, shape, checksum,
+no secret — for the *outside* of the envelope, so you can tell what an
+envelope holds, and whether its contents were superseded, without breaking
+the seal.
 
 Font is Monaco, chosen automatically by the CUPS text filter — slashed zero,
 `1` with a top flag and base serif, `l` with a tail.
@@ -86,9 +111,12 @@ the wrong tool: it changes the content structure, and a blank line on a
 secret page invites the question of whether it is part of the secret.
 
 Spacing costs page room, so coldprint warns before printing if the secret
-will not fit one sheet — 31 printed lines at the default, fewer at `--lpi 3`.
-A secret spanning two sheets is a hazard: sheets get separated, and half a
-secret is no secret.
+will not fit one sheet. A secret spanning sheets is a hazard — sheets get
+separated, and half a secret is no secret — so if you print anyway, coldprint
+paginates the job itself rather than letting the CUPS filter break the page
+blind: every sheet repeats the label, the rule, and the date with a
+`(sheet 2 of 2)` marker, so a separated sheet is at least self-identifying,
+and the footer prints on the last sheet.
 
 ## Verifying a transcription
 
@@ -133,8 +161,8 @@ system.
 
     zsh tests/run_all.zsh
 
-54 tests covering transport classification, the backup gate, capture and paste
-handling, masking, and page layout.
+92 tests covering transport classification, the backup gate, capture and paste
+handling, masking, page layout, pagination, and the envelope slip.
 
 ## Design notes
 

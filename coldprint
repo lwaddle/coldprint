@@ -266,6 +266,10 @@ flag_characters() {
     local -a warn
     local l
     local -i i=0
+    # First line number at which each distinct line appeared. A double paste
+    # of the same block is easy to do blind (echo is off), and the masked
+    # preview of identical lines looks unremarkable.
+    local -A seen
     for l in "$@"; do
         (( i++ ))
         [[ "$l" == *[[:space:]] ]] && \
@@ -274,6 +278,11 @@ flag_characters() {
             warn+=("line $i contains a tab")
         [[ "$l" == *[^[:ascii:]]* ]] && \
             warn+=("line $i contains non-ASCII (prints correctly, but widens the layout)")
+        if [[ -n "${seen[$l]:-}" ]]; then
+            warn+=("line $i duplicates line ${seen[$l]} (double paste?)")
+        else
+            seen[$l]=$i
+        fi
     done
     (( ${#warn} )) && print -rl -- $warn
     return 0
@@ -352,21 +361,6 @@ typeset -g  CPI_DEFAULT=10
 typeset -ga LPI_CHOICES=(3 4 5 6)
 typeset -g  LPI_DEFAULT=4
 
-# rendered_lines <budget> <line>...
-# Printed lines the secret occupies once wrapping is applied. An empty line
-# still occupies one.
-rendered_lines() {
-    local -i budget=$1; shift
-    local -i total=0 segs
-    local l
-    for l in "$@"; do
-        segs=$(( (${#l} + budget - 1) / budget ))
-        (( segs < 1 )) && segs=1
-        (( total += segs ))
-    done
-    print -r -- $total
-}
-
 # page_capacity <lpi>
 # Printable lines per page: 792pt of Letter height less 54pt margins top and
 # bottom, over the 72/lpi point line pitch.
@@ -393,6 +387,87 @@ cpi_choices() {
     print -r -- "8 10 12 15 17"
 }
 
+# Ambiguous glyph pairs, in the order they print. Grouped by confusable
+# cluster (0/O, 1/l/I, 2/Z, 5/S, 8/B, 9/g/q, -/_) so related shapes sit next
+# to each other on the page. The legend's purpose is not to teach 0 vs O but
+# to put this printer's actual glyph shapes beside their names, so only the
+# glyphs the secret contains are printed — an entry for an absent glyph is
+# noise, and a secret with none gets no legend at all.
+typeset -ga GLYPH_LEGEND=(
+    '0=zero' 'O=oh'
+    '1=one' 'l=ell' 'I=eye'
+    '2=two' 'Z=zee'
+    '5=five' 'S=ess'
+    '8=eight' 'B=bee'
+    '9=nine' 'g=gee' 'q=cue'
+    '-=hyphen' '_=underscore'
+)
+
+# legend_lines <width> <text>
+# Prints the legend entries for the ambiguous glyphs present in <text>,
+# wrapped between entries so no line exceeds <width>. No output when none.
+legend_lines() {
+    local -i width=$1
+    local text="$2" entry line=""
+    for entry in $GLYPH_LEGEND; do
+        [[ "$text" == *"${entry[1]}"* ]] || continue
+        if [[ -z "$line" ]]; then
+            line="$entry"
+        elif (( ${#line} + 2 + ${#entry} > width )); then
+            print -r -- "$line"
+            line="$entry"
+        else
+            line+="  $entry"
+        fi
+    done
+    [[ -n "$line" ]] && print -r -- "$line"
+    return 0
+}
+
+# shape_line <lines> <chars>
+# "10 lines, 104 chars" — the expected dimensions, printed on the page so a
+# torn or truncated sheet is detectable and a transcription can be
+# length-checked before hashing.
+shape_line() {
+    local -i n=$1 c=$2
+    local ln="lines" cn="chars"
+    (( n == 1 )) && ln="line"
+    (( c == 1 )) && cn="char"
+    print -r -- "$n $ln, $c $cn"
+}
+
+# make_rule <label> <total>
+# The horizontal rule: at least 50 dashes, widened to match an over-long
+# label, clamped to the printable width. ASCII dashes — non-ASCII would break
+# the cpi width math.
+make_rule() {
+    local label="$1" rule=""
+    local -i total=$2 rule_w=${#label}
+    (( rule_w < 50 )) && rule_w=50
+    (( rule_w > total )) && rule_w=$total
+    repeat $rule_w; do rule+="-"; done
+    print -r -- "$rule"
+}
+
+# page_notes <line>...
+# Notes that must reach the paper, one per line. Trailing whitespace and tabs
+# print invisibly, yet the checksum includes them — a transcription that
+# omits one fails the hash with nothing on the page explaining why. The
+# screen warning (flag_characters) protects the author; only ink protects the
+# reader.
+page_notes() {
+    local l
+    local -i i=0
+    for l in "$@"; do
+        (( i++ ))
+        [[ "$l" == *[[:space:]] ]] && \
+            print -r -- "note: line $i ends with whitespace (part of the secret)"
+        [[ "$l" == *$'\t'* ]] && \
+            print -r -- "note: line $i contains a tab"
+    done
+    return 0
+}
+
 # gutter_width <line-count>
 # Width of the number column including its trailing gap, or 0 when the secret
 # is a single line and carries no numbering.
@@ -410,61 +485,174 @@ gutter_width() {
     print -r -- $(( w + 2 ))
 }
 
-# build_page <label> <date> <total-chars>
-# Reads secret lines from stdin, prints the page. Pure: no side effects and no
-# globals beyond the cpi tables.
+# build_page <label> <date> <total-chars> [capacity] [counts]
+# Reads secret lines from stdin, prints the page(s). Pure: no side effects and
+# no globals beyond the glyph and cpi tables.
+#
+# capacity is printable lines per sheet; 0 or absent disables pagination. When
+# content spills, build_page splits sheets itself with form feeds (the CUPS
+# text filter honours \f, and its break math matches page_capacity) rather
+# than letting the filter break the page blind. Every sheet repeats the label,
+# rule, and a dated "(sheet k of K)" marker so a separated sheet is
+# self-identifying; the footer prints once, on the last sheet.
+#
+# counts=1 adds a right-aligned (nn) column: each source line's length, on its
+# last printed segment, so a mistranscription is localised to one line without
+# bisecting the whole-page hash.
 build_page() {
     local label="$1" date="$2"
-    local -i total=$3
-    local -a lines
+    local -i total=$3 capacity=${4:-0} counts=${5:-0}
+    local -a lines rows footer leg
     local l seg rule=""
-    local -i n numbered gutter marker_w budget i rule_w first
+    local -i n numbered gutter marker_w budget i rule_w first nchars=0
+    local -i countw=0 reserve=0 maxlen=0 linelen last
 
     while IFS= read -r l; do lines+=("$l"); done
     n=${#lines}
 
+    for l in "${lines[@]}"; do (( ${#l} > maxlen )) && maxlen=${#l}; done
+    (( counts )) && { countw=$(( ${#maxlen} + 2 )); reserve=$(( countw + 2 )) }
+
     numbered=0; (( n > 1 )) && numbered=1
-    gutter="$(gutter_width $n)"
+    # A single line has no gutter — unless it wraps, in which case the gutter
+    # is forced so the continuation marker stays visible. Without it a wrapped
+    # single-line secret reads as two lines with nothing saying so.
+    (( n == 1 && ${#lines[1]} > total - reserve )) && numbered=1
+    gutter="$(gutter_width $(( numbered && n == 1 ? 2 : n )))"
     marker_w=$(( gutter > 0 ? gutter - 2 : 0 ))
-    budget=$(( total - gutter ))
+    budget=$(( total - gutter - reserve ))
 
     local joined="${(pj:\n:)lines}"
     local sum="$(printf '%s' "$joined" | shasum -a 256 | cut -c1-8)"
 
-    rule_w=${#label}
-    (( rule_w < 50 )) && rule_w=50
-    (( rule_w > total )) && rule_w=$total
-    repeat $rule_w; do rule+="-"; done
-
-    print -r -- "$label"
-    print -r -- "$rule"
-    print -r -- "$date"
-    print -r -- ""
+    rule="$(make_rule "$label" $total)"
 
     i=0
     for l in "${lines[@]}"; do
         (( i++ ))
+        linelen=${#l}
+        (( nchars += linelen ))
         first=1
         while :; do
             seg="${l[1,$budget]}"
             l="${l[$(( budget + 1 )),-1]}"
+            last=0; [[ -z "$l" ]] && last=1
+            local marker="..."
+            (( first )) && marker="($i)"
             if (( numbered )); then
-                if (( first )); then
-                    printf '%*s  %s\n' $marker_w "($i)" "$seg"
+                if (( counts && last )); then
+                    rows+=("$(printf '%*s  %-*s  %*s' \
+                        $marker_w "$marker" $budget "$seg" $countw "($linelen)")")
                 else
-                    printf '%*s  %s\n' $marker_w '...' "$seg"
+                    rows+=("$(printf '%*s  %s' $marker_w "$marker" "$seg")")
                 fi
+            elif (( counts && last )); then
+                rows+=("$(printf '%-*s  %*s' $budget "$seg" $countw "($linelen)")")
             else
-                printf '%s\n' "$seg"
+                rows+=("$seg")
             fi
             first=0
-            [[ -z "$l" ]] && break
+            (( last )) && break
         done
     done
 
-    print -r -- ""
+    # Footer. The closing rule bounds the secret block — everything between
+    # the two rules is the secret, character for character. Entry 1 is the
+    # separating blank, dropped when the footer opens a fresh sheet (the
+    # header already ends with one).
+    footer=("" "$rule" "$(shape_line $n $nchars)" \
+            "sha256/8: ${sum}  (LF-joined, no trailing NL)")
+    local -a notes
+    notes=( ${(f)"$(page_notes "${lines[@]}")"} )
+    (( ${#notes} )) && footer+=("${notes[@]}")
+    leg=( ${(f)"$(legend_lines $total "$joined")"} )
+    (( ${#leg} )) && footer+=("${leg[@]}")
+
+    local -i nrows=${#rows} flen=${#footer}
+
+    if (( capacity == 0 || 4 + nrows + flen <= capacity )); then
+        print -r -- "$label"
+        print -r -- "$rule"
+        print -r -- "$date"
+        print -r -- ""
+        (( nrows )) && print -rl -- "${rows[@]}"
+        print -rl -- "${footer[@]}"
+        return 0
+    fi
+
+    # A sheet followed by a form feed holds at most capacity-1 lines: at
+    # exactly capacity the filter breaks the page on its own first, and the
+    # form feed then emits a blank sheet (verified empirically against
+    # cgtexttopdf). Only the last sheet may fill completely.
+    local -i cap_final=$(( capacity - 4 )) cap_more=$(( capacity - 5 ))
+    local -i sheets=0 idx=0 placed=0 k take
+    (( cap_more < 1 )) && cap_more=1
+    (( cap_final < 1 )) && cap_final=1
+
+    # Pass 1: count sheets, so every header can say "of K". A sheet is final
+    # when its remaining rows leave room for the footer; if the rows run out
+    # without that, the footer takes a sheet of its own rather than spilling
+    # blind.
+    while (( idx < nrows )); do
+        (( sheets++ ))
+        if (( nrows - idx + flen <= cap_final )); then
+            idx=$nrows; placed=1
+        else
+            (( idx += cap_more ))
+        fi
+    done
+    (( placed )) || (( sheets++ ))
+
+    idx=0
+    for (( k = 1; k <= sheets; k++ )); do
+        if (( k == 1 )); then
+            print -r -- "$label"
+        else
+            print -r -- $'\f'"$label"
+        fi
+        print -r -- "$rule"
+        print -r -- "$date  (sheet $k of $sheets)"
+        print -r -- ""
+        take=$(( nrows - idx ))
+        (( k < sheets && take > cap_more )) && take=$cap_more
+        (( take )) && print -rl -- "${(@)rows[$(( idx + 1 )),$(( idx + take ))]}"
+        (( idx += take ))
+        if (( k == sheets )); then
+            if (( take )); then
+                print -rl -- "${footer[@]}"
+            else
+                print -rl -- "${(@)footer[2,-1]}"
+            fi
+        fi
+    done
+    return 0
+}
+
+# build_envelope_slip <label> <date> <total-chars>
+# Reads secret lines from stdin, prints a slip for the outside of the
+# envelope: label, date, shape, checksum — never the secret itself. Future-me
+# can identify an envelope's contents, and whether they were superseded,
+# without breaking the seal. Pure, like build_page.
+build_envelope_slip() {
+    local label="$1" date="$2"
+    local -i total=$3
+    local -a lines
+    local l
+    local -i nchars=0
+
+    while IFS= read -r l; do lines+=("$l"); done
+    for l in "${lines[@]}"; do (( nchars += ${#l} )); done
+
+    local joined="${(pj:\n:)lines}"
+    local sum="$(printf '%s' "$joined" | shasum -a 256 | cut -c1-8)"
+
+    print -r -- "$label"
+    make_rule "$label" $total
+    print -r -- "$date"
+    shape_line ${#lines} $nchars
     print -r -- "sha256/8: ${sum}  (LF-joined, no trailing NL)"
-    print -r -- "0=zero  O=oh  1=one  l=ell  I=eye"
+    print -r -- ""
+    print -r -- "(envelope slip; contains no secret)"
     return 0
 }
 
@@ -513,16 +701,27 @@ SAMPLE
 }
 
 do_dry_run() {
-    local out="${TMPDIR:-/tmp}/coldprint_dryrun_$$.pdf"
-    local -a lines opts
+    local tmpd="${TMPDIR:-/tmp}"
+    local out="${tmpd}/coldprint_dryrun_$$.pdf"
+    local -a lines opts stale
     local l cpi lpi total
     local -i widest=0
+
+    # Sample PDFs are harmless but used to pile up, one per run. Everything
+    # matching the namespace is ours; remove predecessors so at most the
+    # newest survives.
+    stale=( "$tmpd"/coldprint_dryrun_*(N) )
+    if (( ${#stale} )); then
+        rm -f -- "${stale[@]}"
+        print -r -- "Removed ${#stale} stale dry-run file(s)." >&2
+    fi
 
     lines=( ${(f)"$(dry_run_sample)"} )
     for l in $lines; do (( ${#l} > widest )) && widest=${#l}; done
 
     cpi="${1:-$CPI_DEFAULT}"
     lpi="${2:-$LPI_DEFAULT}"
+    local -i counts=${3:-0}
     total="$(cpi_budget $cpi)"
     opts=( ${(f)"$(lp_options $cpi $lpi)"} )
 
@@ -530,9 +729,10 @@ do_dry_run() {
     # must land on disk first. This is safe only because the dry run renders
     # fixed sample content — it is the reason a real secret is never accepted
     # here. The live print path pipes straight into lp and touches no file.
-    local src="${TMPDIR:-/tmp}/coldprint_dryrun_$$.txt"
+    local src="${tmpd}/coldprint_dryrun_$$.txt"
     print -rl -- $lines \
-        | build_page 'Dry run sample' "$(date '+%Y-%m-%d %H:%M')" $total > "$src"
+        | build_page 'Dry run sample' "$(date '+%Y-%m-%d %H:%M')" \
+            $total "$(page_capacity $lpi)" $counts > "$src"
     cupsfilter -m application/pdf $opts "$src" > "$out" 2>/dev/null
     rm -f "$src"
 
@@ -545,8 +745,8 @@ usage() {
     cat >&2 <<'USAGE'
 coldprint — print a secret to paper for a continuity envelope.
 
-  coldprint [-P PRINTER] [-n COPIES] [--cpi N] [--lpi N]
-  coldprint --dry-run
+  coldprint [-P PRINTER] [-n COPIES] [--cpi N] [--lpi N] [--counts] [--envelope]
+  coldprint --dry-run [--cpi N] [--lpi N] [--counts]
   coldprint -h
 
   -P PRINTER   Use this queue, skipping the selection menu.
@@ -556,6 +756,11 @@ coldprint — print a secret to paper for a continuity envelope.
                the whole page.
   --lpi N      Lines per inch: 3, 4, 5 or 6 (default 4). Lower is more
                space between lines; it does not change the type size.
+  --counts     Print each line's character count in a right-hand column,
+               so a mistranscribed line can be found without bisecting
+               the page checksum.
+  --envelope   Also print a slip for the outside of the envelope: label,
+               date, shape, checksum — no secret.
   --dry-run    Render sample content to a PDF and exit. Never asks for a secret.
   -h           This help.
 
@@ -566,7 +771,7 @@ USAGE
 main() {
     local printer="" label="" reply total
     local cpi="$CPI_DEFAULT" lpi="$LPI_DEFAULT"
-    local -i copies=1 widest=0 gutter=0 wrap_needed=0
+    local -i copies=1 counts=0 envelope=0 dryrun=0
     local -a lines warnings opts
     local l
 
@@ -576,7 +781,9 @@ main() {
             (-n) copies="${2:-1}"; shift 2 ;;
             (--cpi) cpi="${2:-}"; shift 2 ;;
             (--lpi) lpi="${2:-}"; shift 2 ;;
-            (--dry-run) shift; do_dry_run "$cpi" "$lpi"; return 0 ;;
+            (--counts) counts=1; shift ;;
+            (--envelope) envelope=1; shift ;;
+            (--dry-run) dryrun=1; shift ;;
             (-h|--help) usage; return 0 ;;
             (*) print -r -- "Unknown argument: $1" >&2; usage; return 1 ;;
         esac
@@ -595,6 +802,9 @@ main() {
         print -r -- "Lower is more spacing between lines; $LPI_DEFAULT is the default." >&2
         return 1
     }
+    # After cpi/lpi validation, so a dry run rejects bad values the same way
+    # a real run does.
+    (( dryrun )) && { do_dry_run "$cpi" "$lpi" $counts; return 0 }
     [[ -t 0 ]] || {
         print -r -- "A terminal is required: the secret is read with echo disabled." >&2
         return 1
@@ -622,50 +832,65 @@ main() {
         print_indented "  ! " "${warnings[@]}" >&2
     fi
 
-    for l in "${lines[@]}"; do (( ${#l} > widest )) && widest=${#l}; done
-    gutter="$(gutter_width ${#lines})"
-
+    # Render up front, so every warning below describes the artifact that
+    # will actually print, not a parallel computation of it. The page text
+    # holds the secret and is unset alongside the lines.
     total="$(cpi_budget $cpi)"
-    local -i budget=$(( total - gutter ))
-    if (( widest > budget )); then
+    local stamp="$(date '+%Y-%m-%d %H:%M')"
+    local page="$(print -rl -- "${lines[@]}" \
+        | build_page "$label" "$stamp" $total "$(page_capacity $lpi)" $counts)"
+    local slip=""
+    (( envelope )) && slip="$(print -rl -- "${lines[@]}" \
+        | build_envelope_slip "$label" "$stamp" $total)"
+
+    if print -r -- "$page" | grep -q '^ *\.\.\.  '; then
         print -r -- "" >&2
         print -r -- "  ! Longest line exceeds the page width at cpi=$cpi; it will wrap," >&2
         print -r -- "    marked by ... in the number column. Use --cpi for denser text." >&2
     fi
 
-    # A secret continuing onto a second sheet is a real hazard: the sheets can
-    # be separated, and half a secret is no secret. Warn before printing, not
-    # after.
-    # label, rule, date, blank, <content>, blank, checksum, legend
-    local -i needed=$(( $(rendered_lines $budget "${lines[@]}") + 7 ))
-    local -i capacity="$(page_capacity $lpi)"
-    if (( needed > capacity )); then
+    # A secret spanning sheets is a hazard even now that each sheet is
+    # labelled "(sheet k of K)": sheets can still be separated, and half a
+    # secret is no secret. Say so before printing, not after.
+    local -i sheets=$(( $(print -r -- "$page" | grep -c $'\f') + 1 ))
+    if (( sheets > 1 )); then
         print -r -- "" >&2
-        print -r -- "  ! Needs $needed lines; only $capacity fit a page at lpi=$lpi." >&2
-        print -r -- "    This will run onto a second sheet. --lpi 6 or --cpi 12 to fit one." >&2
+        print -r -- "  ! Spans $sheets sheets at lpi=$lpi; each is labelled '(sheet k of $sheets)'," >&2
+        print -r -- "    but keep them together. --lpi 6 or --cpi 12 to fit one sheet." >&2
     fi
 
     print -r -- "" >&2
-    printf '  Print %d cop%s to %s? [y/N]: ' \
-        $copies "$( (( copies == 1 )) && print -n y || print -n ies )" "$printer" >&2
+    printf '  Print %d cop%s%s to %s? [y/N]: ' \
+        $copies "$( (( copies == 1 )) && print -n y || print -n ies )" \
+        "$( (( envelope )) && print -n ' + envelope slip' )" "$printer" >&2
     IFS= read -r reply || return 0
     [[ "$reply" == [yY] ]] || {
-        print -r -- "  Cancelled." >&2; unset lines label; return 0
+        print -r -- "  Cancelled." >&2; unset lines label page slip; return 0
     }
 
     opts=( ${(f)"$(lp_options $cpi $lpi)"} )
-    if ! print -rl -- "${lines[@]}" \
-        | build_page "$label" "$(date '+%Y-%m-%d %H:%M')" $total \
+    if ! print -r -- "$page" \
         | lp -d "$printer" -n $copies $opts >/dev/null 2>&1
     then
         print -r -- "  Print submission failed." >&2
-        unset lines label
+        unset lines label page slip
         return 4
+    fi
+
+    # The slip holds no secret, so a failure here is reported but does not
+    # abort: the secret page is already queued and the post-print hygiene
+    # below still matters.
+    if (( envelope )); then
+        if ! print -r -- "$slip" \
+            | lp -d "$printer" -n $copies $opts >/dev/null 2>&1
+        then
+            print -r -- "  Envelope slip submission failed; the secret page was submitted." >&2
+        fi
     fi
 
     # Drops the references. It does NOT zero the memory — shell cannot do that,
     # and pretending otherwise would be worse than saying so.
-    unset lines label
+    unset lines label page slip
 
     print -r -- "" >&2
     print -r -- "  Submitted to $printer." >&2

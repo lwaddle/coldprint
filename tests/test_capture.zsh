@@ -46,6 +46,17 @@ assert_eq "non-ascii is flagged as a layout risk" \
 assert_eq "clean lines produce no warnings" \
     "" "$(flag_characters 'abc123' 'def456')"
 
+# A double paste of the same block is easy to do blind (echo is off) and the
+# masked preview of identical lines looks unremarkable.
+assert_eq "a duplicate line is flagged with both positions" \
+    "line 3 duplicates line 1 (double paste?)" \
+    "$(flag_characters 'aaa' 'bbb' 'aaa')"
+
+assert_eq "each later duplicate points at the first occurrence" \
+    "line 2 duplicates line 1 (double paste?)
+line 3 duplicates line 1 (double paste?)" \
+    "$(flag_characters 'x1y2' 'x1y2' 'x1y2')"
+
 # Defence in depth: disabling bracketed paste only works if the terminal obeys.
 # tmux re-arms it. Wrapper bytes are never legitimate secret content, and a
 # silently corrupted secret on paper is unrecoverable.

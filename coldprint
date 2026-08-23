@@ -353,25 +353,35 @@ render_preview() {
 typeset -gA CPI_BUDGET=( 8 56  10 70  12 84  15 105  17 119 )
 typeset -g  CPI_DEFAULT=10
 
-# Line spacing. lpi controls leading only: a 10-character string measures
-# 72.01pt at every lpi, while the line pitch moves 12pt (lpi=6) to 24pt
-# (lpi=3). Blank lines between entries would be the wrong tool — they change
-# the content structure, and a blank line on a secret page invites the question
-# of whether it is part of the secret.
-typeset -ga LPI_CHOICES=(3 4 5 6)
-typeset -g  LPI_DEFAULT=4
+# Line spacing. lpi is NOT leading, despite what this file once claimed:
+# cgtexttopdf stretches glyphs vertically to fill the entire line pitch
+# (v-scale = 72/lpi while h-scale = 120/cpi, measured 2026-08-23 from the
+# text matrices it emits — the earlier "lpi is leading only" conclusion
+# measured width and never looked at height). Two corollaries:
+#
+#   1. No lpi value can create white space between lines: the ink always
+#      fills the pitch. White space comes from interleaved blank lines.
+#   2. Glyphs keep Monaco's natural proportions only at lpi = 0.6*cpi, so
+#      lpi is derived from cpi, never chosen.
+typeset -gA CPI_LPI=( 8 4.8  10 6  12 7.2  15 9  17 10.2 )
 
-# page_capacity <lpi>
-# Printable lines per page: 792pt of Letter height less 54pt margins top and
-# bottom, over the 72/lpi point line pitch.
-page_capacity() {
-    local -i lpi=$1
-    print -r -- $(( (792 - 54 - 54) * lpi / 72 ))
+# cpi_lpi <cpi>
+# The natural-aspect lpi for a cpi. Returns 1 if the cpi is unknown.
+cpi_lpi() {
+    [[ -n "${CPI_LPI[$1]:-}" ]] || return 1
+    print -r -- "${CPI_LPI[$1]}"
 }
 
-# lpi_ok <lpi>
-lpi_ok() {
-    [[ -n "${LPI_CHOICES[(r)$1]}" ]]
+# page_capacity <cpi>
+# Printable lines per page at the derived lpi: 792pt of Letter height less
+# 54pt margins top and bottom, over the 72/lpi point line pitch — floored,
+# in tenths so fractional lpi stays in integer arithmetic. Verified against
+# the filter's own break points (45/57/68 at lpi 4.8/6/7.2).
+page_capacity() {
+    local l="$(cpi_lpi $1)" || return 1
+    local -i l10
+    if [[ "$l" == *.* ]]; then l10=${l/./}; else l10=$(( l * 10 )); fi
+    print -r -- $(( (792 - 54 - 54) * l10 / 720 ))
 }
 
 # cpi_budget <cpi>
@@ -501,8 +511,8 @@ gutter_width() {
 # bisecting the whole-page hash.
 build_page() {
     local label="$1" date="$2"
-    local -i total=$3 capacity=${4:-0} counts=${5:-0}
-    local -a lines rows footer leg
+    local -i total=$3 capacity=${4:-0} counts=${5:-0} compact=${6:-0}
+    local -a lines rows footer leg gstart
     local l seg rule=""
     local -i n numbered gutter marker_w budget i rule_w first nchars=0
     local -i countw=0 reserve=0 maxlen=0 linelen last
@@ -551,6 +561,7 @@ build_page() {
             else
                 rows+=("$seg")
             fi
+            gstart+=($first)
             first=0
             (( last )) && break
         done
@@ -570,12 +581,27 @@ build_page() {
 
     local -i nrows=${#rows} flen=${#footer}
 
-    if (( capacity == 0 || 4 + nrows + flen <= capacity )); then
+    # Real leading: a blank line between source-line groups (the only way to
+    # get white space — see the CPI_LPI note). A wrapped continuation hugs
+    # its first segment, so the group reads as one code. compact drops the
+    # blanks to pack a large secret onto one sheet.
+    local -i gap=1 ngroups=0 r
+    (( compact )) && gap=0
+    for (( r = 1; r <= nrows; r++ )); do (( ngroups += gstart[r] )); done
+    local -i body=$(( nrows + gap * (ngroups - 1) ))
+
+    local -i first_on
+    if (( capacity == 0 || 4 + body + flen <= capacity )); then
         print -r -- "$label"
         print -r -- "$rule"
         print -r -- "$date"
         print -r -- ""
-        (( nrows )) && print -rl -- "${rows[@]}"
+        first_on=1
+        for (( r = 1; r <= nrows; r++ )); do
+            (( gap && gstart[r] && first_on == 0 )) && print -r -- ""
+            print -r -- "${rows[r]}"
+            first_on=0
+        done
         print -rl -- "${footer[@]}"
         return 0
     fi
@@ -583,27 +609,32 @@ build_page() {
     # A sheet followed by a form feed holds at most capacity-1 lines: at
     # exactly capacity the filter breaks the page on its own first, and the
     # form feed then emits a blank sheet (verified empirically against
-    # cgtexttopdf). Only the last sheet may fill completely.
-    local -i cap_final=$(( capacity - 4 )) cap_more=$(( capacity - 5 ))
-    local -i sheets=0 idx=0 placed=0 k take
-    (( cap_more < 1 )) && cap_more=1
-    (( cap_final < 1 )) && cap_final=1
-
-    # Pass 1: count sheets, so every header can say "of K". A sheet is final
-    # when its remaining rows leave room for the footer; if the rows run out
-    # without that, the footer takes a sheet of its own rather than spilling
-    # blind.
-    while (( idx < nrows )); do
-        (( sheets++ ))
-        if (( nrows - idx + flen <= cap_final )); then
-            idx=$nrows; placed=1
+    # cgtexttopdf). Only the last sheet may fill completely, which is why the
+    # footer check below uses capacity, not the limit.
+    #
+    # Pass 1 simulates the fill to learn the sheet count, so every header
+    # can say "of K"; pass 2 emits the identical layout. A row that opens a
+    # group costs its preceding blank as well, and a group taller than a
+    # sheet simply keeps filling sheets — its continuation rows carry no
+    # blank. If the rows run out without room for the footer, the footer
+    # takes a sheet of its own rather than spilling blind.
+    local -a sheet_take
+    local -i used=4 take=0 cost limit=$(( capacity - 1 ))
+    (( limit < 5 )) && limit=5
+    for (( r = 1; r <= nrows; r++ )); do
+        cost=1
+        (( gap && gstart[r] && take > 0 )) && cost=2
+        if (( used + cost <= limit )); then
+            (( used += cost, take++ ))
         else
-            (( idx += cap_more ))
+            sheet_take+=($take)
+            take=1; used=5
         fi
     done
-    (( placed )) || (( sheets++ ))
+    sheet_take+=($take)
+    (( used + flen > capacity )) && sheet_take+=(0)
 
-    idx=0
+    local -i sheets=${#sheet_take} k j idx=0
     for (( k = 1; k <= sheets; k++ )); do
         if (( k == 1 )); then
             print -r -- "$label"
@@ -613,10 +644,14 @@ build_page() {
         print -r -- "$rule"
         print -r -- "$date  (sheet $k of $sheets)"
         print -r -- ""
-        take=$(( nrows - idx ))
-        (( k < sheets && take > cap_more )) && take=$cap_more
-        (( take )) && print -rl -- "${(@)rows[$(( idx + 1 )),$(( idx + take ))]}"
-        (( idx += take ))
+        take=${sheet_take[k]}
+        first_on=1
+        for (( j = 1; j <= take; j++ )); do
+            (( idx++ ))
+            (( gap && gstart[idx] && first_on == 0 )) && print -r -- ""
+            print -r -- "${rows[idx]}"
+            first_on=0
+        done
         if (( k == sheets )); then
             if (( take )); then
                 print -rl -- "${footer[@]}"
@@ -656,12 +691,13 @@ build_envelope_slip() {
     return 0
 }
 
-# lp_options <cpi> <lpi>
-# sides=one-sided is mandatory, not cosmetic: the queue default is
-# *DuplexNoTumble, which would print copy 2 on the reverse of copy 1 and
-# silently defeat the purpose of making two copies for two locations.
+# lp_options <cpi>
+# lpi is derived (natural aspect), never passed in. sides=one-sided is
+# mandatory, not cosmetic: the queue default is *DuplexNoTumble, which would
+# print copy 2 on the reverse of copy 1 and silently defeat the purpose of
+# making two copies for two locations.
 lp_options() {
-    print -rl -- "-o" "cpi=$1" "-o" "lpi=$2" \
+    print -rl -- "-o" "cpi=$1" "-o" "lpi=$(cpi_lpi $1)" \
                  "-o" "page-left=54" "-o" "page-right=54" \
                  "-o" "page-top=54" "-o" "page-bottom=54" \
                  "-o" "sides=one-sided"
@@ -704,7 +740,7 @@ do_dry_run() {
     local tmpd="${TMPDIR:-/tmp}"
     local out="${tmpd}/coldprint_dryrun_$$.pdf"
     local -a lines opts stale
-    local l cpi lpi total
+    local l cpi total
     local -i widest=0
 
     # Sample PDFs are harmless but used to pile up, one per run. Everything
@@ -720,10 +756,9 @@ do_dry_run() {
     for l in $lines; do (( ${#l} > widest )) && widest=${#l}; done
 
     cpi="${1:-$CPI_DEFAULT}"
-    lpi="${2:-$LPI_DEFAULT}"
-    local -i counts=${3:-0}
+    local -i counts=${2:-0} compact=${3:-0}
     total="$(cpi_budget $cpi)"
-    opts=( ${(f)"$(lp_options $cpi $lpi)"} )
+    opts=( ${(f)"$(lp_options $cpi)"} )
 
     # cupsfilter requires a filename and will not read stdin, so the page text
     # must land on disk first. This is safe only because the dry run renders
@@ -732,7 +767,7 @@ do_dry_run() {
     local src="${tmpd}/coldprint_dryrun_$$.txt"
     print -rl -- $lines \
         | build_page 'Dry run sample' "$(date '+%Y-%m-%d %H:%M')" \
-            $total "$(page_capacity $lpi)" $counts > "$src"
+            $total "$(page_capacity $cpi)" $counts $compact > "$src"
     cupsfilter -m application/pdf $opts "$src" > "$out" 2>/dev/null
     rm -f "$src"
 
@@ -745,17 +780,19 @@ usage() {
     cat >&2 <<'USAGE'
 coldprint — print a secret to paper for a continuity envelope.
 
-  coldprint [-P PRINTER] [-n COPIES] [--cpi N] [--lpi N] [--counts] [--envelope]
-  coldprint --dry-run [--cpi N] [--lpi N] [--counts]
+  coldprint [-P PRINTER] [-n COPIES] [--cpi N] [--compact] [--counts] [--envelope]
+  coldprint --dry-run [--cpi N] [--compact] [--counts]
   coldprint -h
 
   -P PRINTER   Use this queue, skipping the selection menu.
   -n COPIES    Number of copies (default 1). Always one-sided.
   --cpi N      Characters per inch: 8, 10, 12, 15 or 17 (default 10).
                Lower is larger type. Long lines wrap rather than shrink
-               the whole page.
-  --lpi N      Lines per inch: 3, 4, 5 or 6 (default 4). Lower is more
-               space between lines; it does not change the type size.
+               the whole page. Line spacing follows automatically: glyphs
+               keep their natural shape and each code gets a blank line
+               of breathing room.
+  --compact    Single-spaced: drop the blank line between codes to fit a
+               large secret on one sheet.
   --counts     Print each line's character count in a right-hand column,
                so a mistranscribed line can be found without bisecting
                the page checksum.
@@ -770,8 +807,8 @@ USAGE
 
 main() {
     local printer="" label="" reply total
-    local cpi="$CPI_DEFAULT" lpi="$LPI_DEFAULT"
-    local -i copies=1 counts=0 envelope=0 dryrun=0
+    local cpi="$CPI_DEFAULT"
+    local -i copies=1 counts=0 envelope=0 dryrun=0 compact=0
     local -a lines warnings opts
     local l
 
@@ -780,7 +817,13 @@ main() {
             (-P) printer="${2:-}"; shift 2 ;;
             (-n) copies="${2:-1}"; shift 2 ;;
             (--cpi) cpi="${2:-}"; shift 2 ;;
-            (--lpi) lpi="${2:-}"; shift 2 ;;
+            (--lpi)
+                print -r -- "--lpi is gone: the text filter stretches glyphs to fill the" >&2
+                print -r -- "line pitch, so lpi never added space between lines — it only" >&2
+                print -r -- "distorted the type. Spacing is now automatic; --compact packs" >&2
+                print -r -- "tighter, --cpi changes the type size." >&2
+                return 1 ;;
+            (--compact) compact=1; shift ;;
             (--counts) counts=1; shift ;;
             (--envelope) envelope=1; shift ;;
             (--dry-run) dryrun=1; shift ;;
@@ -797,14 +840,9 @@ main() {
         print -r -- "Lower is larger type; $CPI_DEFAULT is the default." >&2
         return 1
     }
-    lpi_ok "$lpi" || {
-        print -r -- "Unsupported --lpi $lpi. Choose one of: ${LPI_CHOICES}" >&2
-        print -r -- "Lower is more spacing between lines; $LPI_DEFAULT is the default." >&2
-        return 1
-    }
-    # After cpi/lpi validation, so a dry run rejects bad values the same way
-    # a real run does.
-    (( dryrun )) && { do_dry_run "$cpi" "$lpi" $counts; return 0 }
+    # After cpi validation, so a dry run rejects bad values the same way a
+    # real run does.
+    (( dryrun )) && { do_dry_run "$cpi" $counts $compact; return 0 }
     [[ -t 0 ]] || {
         print -r -- "A terminal is required: the secret is read with echo disabled." >&2
         return 1
@@ -838,7 +876,7 @@ main() {
     total="$(cpi_budget $cpi)"
     local stamp="$(date '+%Y-%m-%d %H:%M')"
     local page="$(print -rl -- "${lines[@]}" \
-        | build_page "$label" "$stamp" $total "$(page_capacity $lpi)" $counts)"
+        | build_page "$label" "$stamp" $total "$(page_capacity $cpi)" $counts $compact)"
     local slip=""
     (( envelope )) && slip="$(print -rl -- "${lines[@]}" \
         | build_envelope_slip "$label" "$stamp" $total)"
@@ -855,8 +893,8 @@ main() {
     local -i sheets=$(( $(print -r -- "$page" | grep -c $'\f') + 1 ))
     if (( sheets > 1 )); then
         print -r -- "" >&2
-        print -r -- "  ! Spans $sheets sheets at lpi=$lpi; each is labelled '(sheet k of $sheets)'," >&2
-        print -r -- "    but keep them together. --lpi 6 or --cpi 12 to fit one sheet." >&2
+        print -r -- "  ! Spans $sheets sheets; each is labelled '(sheet k of $sheets)'," >&2
+        print -r -- "    but keep them together. --compact or --cpi 12 may fit one sheet." >&2
     fi
 
     print -r -- "" >&2
@@ -868,7 +906,7 @@ main() {
         print -r -- "  Cancelled." >&2; unset lines label page slip; return 0
     }
 
-    opts=( ${(f)"$(lp_options $cpi $lpi)"} )
+    opts=( ${(f)"$(lp_options $cpi)"} )
     if ! print -r -- "$page" \
         | lp -d "$printer" -n $copies $opts >/dev/null 2>&1
     then

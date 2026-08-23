@@ -7,7 +7,7 @@ unencrypted network hop.
     ./coldprint                 # select a printer, enter a secret
     ./coldprint -P NAME -n 2    # named queue, two copies
     ./coldprint --cpi 8         # larger type
-    ./coldprint --lpi 3         # more space between lines
+    ./coldprint --compact       # single-spaced, for large secrets
     ./coldprint --counts        # per-line character counts on the page
     ./coldprint --envelope      # also print a no-secret slip for the envelope
     ./coldprint --dry-run       # render sample content to a PDF
@@ -56,7 +56,9 @@ unencrypted network hop.
     2026-08-21 22:22
 
      (1)  4fh2n8-xk3m2c
+
      (2)  9ap7q1-w4rte1
+
      ...
 
     --------------------------------------------------
@@ -103,12 +105,18 @@ part of the code. Continuations are marked by `...` in the number column, never 
 appended to the secret itself. `--cpi 8` gives larger type; `--cpi 15` or `17`
 pack more per line if you prefer fewer wraps.
 
-Line spacing is separate. `--lpi` (3, 4, 5 or 6; default 4) changes the
-leading **without** changing the type size — verified: a ten-character string
-measures 72.01pt at every setting while the line pitch moves from 12pt at
-`--lpi 6` to 24pt at `--lpi 3`. Adding blank lines between entries would be
-the wrong tool: it changes the content structure, and a blank line on a
-secret page invites the question of whether it is part of the secret.
+Line spacing is automatic, and there is no `--lpi` because lpi turned out to
+be a lie. Measured from the text matrices the CUPS filter emits: it
+**stretches every glyph vertically to fill the entire line pitch** (vertical
+scale = 72/lpi while horizontal scale = 120/cpi), so no lpi value can ever
+put white space between lines — "looser" spacing just printed taller,
+distorted letters whose descenders still met the next line's ascenders.
+coldprint now pins lpi to `0.6 × cpi`, the one value where Monaco keeps its
+natural proportions, and gets real breathing room the only way possible: a
+blank line between codes. A wrapped continuation still hugs its own first
+segment, so each code reads as one visual group. `--compact` drops the
+blank lines (still natural-aspect type) when a large secret needs to fit
+one sheet.
 
 Spacing costs page room, so coldprint warns before printing if the secret
 will not fit one sheet. A secret spanning sheets is a hazard — sheets get
@@ -161,7 +169,7 @@ system.
 
     zsh tests/run_all.zsh
 
-92 tests covering transport classification, the backup gate, capture and paste
+99 tests covering transport classification, the backup gate, capture and paste
 handling, masking, page layout, pagination, and the envelope slip.
 
 ## Design notes

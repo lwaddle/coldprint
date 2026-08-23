@@ -14,19 +14,32 @@ cpi_budget 10 >/dev/null 2>&1; assert_status "supported cpi accepted"   0 $?
 assert_eq "choices are offered largest-type first" "8 10 12 15 17" "$(cpi_choices)"
 
 # --- line spacing ----------------------------------------------------------
-# lpi is leading only: glyph width measures 72.01pt for 10 characters at every
-# lpi, while the line pitch moves 12pt (lpi=6) to 24pt (lpi=3).
-assert_eq "default leaves breathing room" "4" "$LPI_DEFAULT"
-assert_eq "lpi 6 capacity" "57" "$(page_capacity 6)"
-assert_eq "lpi 5 capacity" "47" "$(page_capacity 5)"
-assert_eq "lpi 4 capacity" "38" "$(page_capacity 4)"
-assert_eq "lpi 3 capacity" "28" "$(page_capacity 3)"
-lpi_ok 4 && assert_status "supported lpi accepted" 0 0 || assert_status "supported lpi accepted" 0 1
-lpi_ok 7 && assert_status "unsupported lpi rejected" 1 0 || assert_status "unsupported lpi rejected" 1 1
+# lpi is NOT leading: cgtexttopdf stretches glyphs vertically to fill the
+# entire line pitch (v-scale = 72/lpi while h-scale = 120/cpi, measured
+# 2026-08-23), so no lpi value can create white space between lines. Glyphs
+# keep Monaco's natural proportions only at lpi = 0.6*cpi, which is therefore
+# derived, not chosen; white space comes from interleaved blank lines.
+assert_eq "cpi 8 derives lpi 4.8"    "4.8"  "$(cpi_lpi 8)"
+assert_eq "cpi 10 derives lpi 6"     "6"    "$(cpi_lpi 10)"
+assert_eq "cpi 12 derives lpi 7.2"   "7.2"  "$(cpi_lpi 12)"
+assert_eq "cpi 15 derives lpi 9"     "9"    "$(cpi_lpi 15)"
+assert_eq "cpi 17 derives lpi 10.2"  "10.2" "$(cpi_lpi 17)"
 
-assert_eq "lp_options carries the requested lpi and forces one-sided" \
-    "cpi=10 lpi=4 sides=one-sided" \
-    "$(lp_options 10 4 | grep -E '^(cpi|lpi|sides)=' | tr '\n' ' ' | sed 's/ $//')"
+# Capacity per cpi, floor(684 * lpi / 72), verified against the filter's own
+# break points (45/57/68 measured at lpi 4.8/6/7.2).
+assert_eq "cpi 8 capacity"  "45" "$(page_capacity 8)"
+assert_eq "cpi 10 capacity" "57" "$(page_capacity 10)"
+assert_eq "cpi 12 capacity" "68" "$(page_capacity 12)"
+assert_eq "cpi 15 capacity" "85" "$(page_capacity 15)"
+assert_eq "cpi 17 capacity" "96" "$(page_capacity 17)"
+
+assert_eq "lp_options derives the natural-aspect lpi and forces one-sided" \
+    "cpi=10 lpi=6 sides=one-sided" \
+    "$(lp_options 10 | grep -E '^(cpi|lpi|sides)=' | tr '\n' ' ' | sed 's/ $//')"
+
+assert_eq "lp_options keeps fractional lpi for cpi 12" \
+    "cpi=12 lpi=7.2 sides=one-sided" \
+    "$(lp_options 12 | grep -E '^(cpi|lpi|sides)=' | tr '\n' ' ' | sed 's/ $//')"
 
 # --- gutter ---------------------------------------------------------------
 # Bare ordinals read as part of a numeric secret, so markers are parenthesised.
@@ -52,12 +65,26 @@ assert_eq "multi-line page is numbered, delimited, and carries metadata" \
 2026-08-21 21:45
 
  (1)  aaa
+
  (2)  bbb
 
 --------------------------------------------------
 2 lines, 6 chars
 sha256/8: ${SUM_MULTI}  (LF-joined, no trailing NL)" \
     "$(printf 'aaa\nbbb\n' | build_page 'My codes' '2026-08-21 21:45' 70)"
+
+assert_eq "compact mode drops the interleaved blanks" \
+"My codes
+--------------------------------------------------
+2026-08-21 21:45
+
+ (1)  aaa
+ (2)  bbb
+
+--------------------------------------------------
+2 lines, 6 chars
+sha256/8: ${SUM_MULTI}  (LF-joined, no trailing NL)" \
+    "$(printf 'aaa\nbbb\n' | build_page 'My codes' '2026-08-21 21:45' 70 0 0 1)"
 
 SUM_ONE="$(printf '%s' 'hunter2' | shasum -a 256 | cut -c1-8)"
 assert_eq "single-line page omits the number gutter" \
@@ -74,16 +101,19 @@ sha256/8: ${SUM_ONE}  (LF-joined, no trailing NL)
     "$(printf 'hunter2\n' | build_page 'My pass' '2026-08-21 21:45' 70)"
 
 # Wrapping uses the gutter, never an in-band marker, so no character is ever
-# appended to the secret's own text.
+# appended to the secret's own text. The interleaved blank separates SOURCE
+# lines: a continuation hugs its first segment, so the group reads as one
+# code.
 SUM_WRAP="$(printf '%s' 'ABCDEFGHIJKLMNO
 short' | shasum -a 256 | cut -c1-8)"
-assert_eq "over-width line wraps into the gutter" \
+assert_eq "over-width line wraps into the gutter, continuation hugging" \
 "W
 ----------------
 2026-08-21 21:45
 
  (1)  ABCDEFGHIJ
  ...  KLMNO
+
  (2)  short
 
 ----------------
@@ -145,13 +175,13 @@ assert_eq "clean secret carries no notes" \
 assert_eq "counts column is right-aligned past the widest content" \
 " (1)  abcdef     (6)
  (2)  xy         (2)" \
-    "$(printf 'abcdef\nxy\n' | build_page 'C' '2026-08-21 21:45' 20 0 1 | sed -n '5,6p')"
+    "$(printf 'abcdef\nxy\n' | build_page 'C' '2026-08-21 21:45' 20 0 1 1 | sed -n '5,6p')"
 
 assert_eq "a wrapped line carries its count on the last segment only" \
 " (1)  abcdefgh
  ...  jkm       (11)
  (2)  xy         (2)" \
-    "$(printf 'abcdefghjkm\nxy\n' | build_page 'C' '2026-08-21 21:45' 20 0 1 | sed -n '5,7p')"
+    "$(printf 'abcdefghjkm\nxy\n' | build_page 'C' '2026-08-21 21:45' 20 0 1 1 | sed -n '5,7p')"
 
 # The counts column narrows the budget, so the single-line wrap check must
 # account for it: 15 chars at total 20 with counts reserved must still wrap
@@ -159,7 +189,7 @@ assert_eq "a wrapped line carries its count on the last segment only" \
 assert_eq "counts reserve keeps single-line wraps visible" \
 " (1)  abcdefhj
  ...  kmnprst   (15)" \
-    "$(printf 'abcdefhjkmnprst\n' | build_page 'C' '2026-08-21 21:45' 20 0 1 | sed -n '5,6p')"
+    "$(printf 'abcdefhjkmnprst\n' | build_page 'C' '2026-08-21 21:45' 20 0 1 1 | sed -n '5,6p')"
 
 # --- pagination -----------------------------------------------------------
 # When a secret spills past one sheet, build_page paginates itself with form
@@ -206,11 +236,73 @@ assert_eq "spilling content paginates with headers on every sheet" \
 10 lines, 20 chars
 sha256/8: ${SUM_PAGED}  (LF-joined, no trailing NL)" \
     "$(printf 'aa\nbb\ncc\ndd\nee\nff\nhh\nmm\nnn\npp\n' \
-        | build_page 'Codes' '2026-08-21 21:45' 70 12)"
+        | build_page 'Codes' '2026-08-21 21:45' 70 12 0 1)"
 
 assert_eq "content that fits one sheet gets no sheet marker" \
     "2026-08-21 21:45" \
     "$(printf 'aa\nbb\n' | build_page 'Codes' '2026-08-21 21:45' 70 38 | sed -n 3p)"
+
+# Interleaved pagination: the blank between groups costs a line, and a group
+# is never separated from the blank that precedes it.
+SUM_ILV="$(printf '%s' 'aa
+bb
+cc
+dd
+ee
+ff' | shasum -a 256 | cut -c1-8)"
+assert_eq "interleaved content paginates with its blanks accounted" \
+"Codes
+--------------------------------------------------
+2026-08-21 21:45  (sheet 1 of 2)
+
+ (1)  aa
+
+ (2)  bb
+
+ (3)  cc
+
+ (4)  dd
+"$'\f'"Codes
+--------------------------------------------------
+2026-08-21 21:45  (sheet 2 of 2)
+
+ (5)  ee
+
+ (6)  ff
+
+--------------------------------------------------
+6 lines, 12 chars
+sha256/8: ${SUM_ILV}  (LF-joined, no trailing NL)" \
+    "$(printf 'aa\nbb\ncc\ndd\nee\nff\n' \
+        | build_page 'Codes' '2026-08-21 21:45' 70 12)"
+
+# A single source line taller than a sheet is split across sheets — with no
+# blanks inside the group, since the segments are one code.
+SUM_TALL="$(printf '%s' "$(printf 'a%.0s' {1..60})" | shasum -a 256 | cut -c1-8)"
+assert_eq "a group taller than a sheet splits without internal blanks" \
+"T
+------------
+2026-08-21 21:45  (sheet 1 of 2)
+
+ (1)  aaaaaa
+ ...  aaaaaa
+ ...  aaaaaa
+ ...  aaaaaa
+ ...  aaaaaa
+ ...  aaaaaa
+ ...  aaaaaa
+"$'\f'"T
+------------
+2026-08-21 21:45  (sheet 2 of 2)
+
+ ...  aaaaaa
+ ...  aaaaaa
+ ...  aaaaaa
+
+------------
+1 line, 60 chars
+sha256/8: ${SUM_TALL}  (LF-joined, no trailing NL)" \
+    "$(printf 'a%.0s' {1..60} | { cat; echo } | build_page 'T' '2026-08-21 21:45' 12 12)"
 
 # When the rows fill every non-final sheet, the footer moves to a sheet of
 # its own rather than spilling blind — and drops its leading blank line,
@@ -230,7 +322,7 @@ ee
 ff
 hh' | shasum -a 256 | cut -c1-8)  (LF-joined, no trailing NL)" \
     "$(printf 'aa\nbb\ncc\ndd\nee\nff\nhh\n' \
-        | build_page 'Codes' '2026-08-21 21:45' 70 12 | sed -n '12,$p')"
+        | build_page 'Codes' '2026-08-21 21:45' 70 12 0 1 | sed -n '12,$p')"
 
 # --- envelope slip --------------------------------------------------------
 # A slip for the outside of the envelope: label, date, shape, checksum — no

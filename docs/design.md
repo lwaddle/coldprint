@@ -169,7 +169,9 @@ Layout:
     2026-08-21 21:45
 
      (1)  4fh2n8-xk3m2c
+
      (2)  9ap7q1-w4rte1
+
       ...
 
     ──────────────────────────────
@@ -245,7 +247,7 @@ only layout primitive the design needs.
 **Print options (all mandatory):**
 
     -o cpi=N
-    -o lpi=N          # 3/4/5/6, default 4
+    -o lpi=<0.6*cpi>  # derived, never chosen — see below
     -o page-left=54 -o page-right=54 -o page-top=54 -o page-bottom=54
     -o sides=one-sided
 
@@ -253,17 +255,35 @@ only layout primitive the design needs.
 `*DuplexNoTumble`; with `-n 2` the second copy would print on the reverse of the
 first, silently destroying the purpose of making two copies for two locations.
 
-**Line spacing is leading only.** Measured 2026-08-22: a ten-character string
-is 72.01pt wide at every lpi, while the line pitch moves 12pt (lpi=6), 18pt
-(lpi=4), 24pt (lpi=3). So spacing and type size are independent controls, and
-the default moved from 6 to 4 after the first real print read as cramped.
-Inserting blank lines was rejected: it alters the content structure, and a
-blank line on a secret page raises the question of whether it belongs to the
-secret.
+**lpi is not leading — CORRECTED 2026-08-23.** The 2026-08-22 conclusion
+("line spacing is leading only") measured glyph *width* at several lpi values
+and never looked at height. The text matrices `cgtexttopdf` emits tell the
+real story: it renders with `Tm` scale `(120/cpi, 72/lpi)` — the glyphs are
+**stretched vertically to fill the entire line pitch**. Measured: v-scale 24
+at lpi=3, 20.57 at lpi=3.5, 18 at lpi=4, 12 at lpi=6, at a constant h-scale
+of 12 (cpi=10). Two corollaries drive the current design:
+
+1. No lpi value can create white space between lines. The ink always fills
+   the pitch; "looser" lpi printed taller, distorted glyphs whose descenders
+   still met the next line's ascenders. This is why every earlier attempt to
+   fix cramped output by lowering lpi still read as cramped.
+2. Glyphs keep Monaco's natural proportions only at `lpi = 0.6 × cpi`
+   (v-scale = h-scale). lpi is therefore derived from cpi (`CPI_LPI`:
+   8→4.8, 10→6, 12→7.2, 15→9, 17→10.2 — fractional lpi is accepted, break
+   points verified) and `--lpi` is gone.
+
+Real leading comes from the only mechanism left: **a blank line between
+source lines**. The old objection — a blank line raises the question of
+whether it belongs to the secret — dissolved once every code is spaced
+uniformly, the lines are numbered, and the footer states the line count. A
+wrapped continuation carries no blank before it, so each code reads as one
+visual group. `--compact` drops the blanks (keeping natural-aspect type)
+when a large secret must fit one sheet.
 
 **Page capacity is checked before printing, and spills are paginated, not
-suffered.** Lower lpi means fewer lines per sheet — 57 at lpi=6 down to 28 at
-lpi=3 — so the overflow risk rises with the lpi=4 default. A secret
+suffered.** Capacity follows the derived lpi — 45/57/68/85/96 lines at
+cpi 8/10/12/15/17, `floor(684 × lpi / 72)`, each verified against the
+filter's actual break points — and interleaved blanks cost lines. A secret
 continuing onto a second sheet is a real hazard, because the sheets can be
 separated and half a secret is no secret. `main` warns before printing; if
 the user prints anyway, `build_page` splits the sheets itself with form feeds
@@ -274,7 +294,7 @@ of its own when the rows fill every earlier one.
 
 Two facts about `cgtexttopdf`, both established empirically 2026-08-23:
 it honours `\f` as a page break, and its own break math matches
-`page_capacity` exactly (38 lines at lpi=4). The corollary bit during
+`page_capacity` exactly (45/57/68 lines measured at lpi 4.8/6/7.2). The corollary bit during
 implementation: a form feed arriving when the page is *exactly* full produces
 a blank sheet, because the filter has already broken the page on its own. A
 sheet followed by a form feed therefore holds at most `capacity - 1` lines;
@@ -384,8 +404,8 @@ Single zsh file. Dependencies are base macOS only: `lp`, `lpstat`, `cancel`,
 `build_page` is pure by design — no I/O, no globals — so it can be exercised
 with dummy input from a test harness and from `--dry-run` without a printer.
 
-Flags: `-P NAME`, `-n COPIES` (default 1), `--cpi N`, `--lpi N`, `--counts`,
-`--envelope`, `--dry-run`, `-h`.
+Flags: `-P NAME`, `-n COPIES` (default 1), `--cpi N`, `--compact`,
+`--counts`, `--envelope`, `--dry-run`, `-h`.
 
 Exit codes: `0` success or user cancel; `1` usage/validation error; `2` backup
 gate refused; `3` printer selection refused; `4` print submission failed.
